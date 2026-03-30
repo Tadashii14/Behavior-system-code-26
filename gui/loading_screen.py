@@ -13,7 +13,7 @@ class LoadingScreen(QWidget):
             | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setFixedSize(420, 260)
-        self.setStyleSheet("background-color: #121016; border-radius: 14px;")
+        self.setStyleSheet("background-color: #0a0b0f; border-radius: 16px;")
 
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -26,15 +26,15 @@ class LoadingScreen(QWidget):
         title = QLabel("ZIMON")
         title.setFont(QFont("Segoe UI", 26, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("color: #8B5CF6;")
+        title.setStyleSheet("color: #6366f1;")
 
         subtitle = QLabel("Behaviour Tracking System")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet("color: #AAAAAA;")
+        subtitle.setStyleSheet("color: #a0a4ac;")
 
         self.status = QLabel("Initializing…")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status.setStyleSheet("color: #CCCCCC;")
+        self.status.setStyleSheet("color: #e8e9ea;")
 
         layout.addWidget(logo)
         layout.addWidget(title)

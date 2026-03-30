@@ -52,7 +52,17 @@ Thumbs.db
 temp/
 tmp/
 
-# ZebraZoom outputs (optional - uncomment if you don't want to track these)
-# ZZoutput/
-# results/
+# ZebraZoom outputs
+ZZoutput/
+results/
+
+# Camera and analysis outputs
+*.mp4
+*.avi
+*.mov
+recordings/
+analysis_output/
+
+
+
 

@@ -24,6 +24,7 @@ class ArduinoController:
         self.baudrate = baudrate
         self.timeout = timeout
         self.ser: Optional[serial.Serial] = None
+        self._connecting = False  # Prevent concurrent connection attempts
 
         if self.port:
             try:
@@ -63,14 +64,14 @@ class ArduinoController:
             s = serial.Serial(port, self.baudrate, timeout=1.0)
             
             # Arduino resets when DTR toggles (happens on open)
-            # Wait longer for Arduino to boot and send startup messages
-            time.sleep(1.5)  # Give Arduino time to reset and boot
+            # Wait shorter for Arduino to boot and send startup messages
+            time.sleep(0.8)  # Reduced from 1.5
             
             try:
                 # Clear input buffer first
                 s.reset_input_buffer()
                 # Read and discard all startup messages (ZIMON_MEGA_READY, etc.)
-                deadline = time.time() + 1.0
+                deadline = time.time() + 0.8  # Reduced from 1.0
                 startup_lines = []
                 while time.time() < deadline:
                     try:
@@ -82,16 +83,16 @@ class ArduinoController:
                                 # If we see ZIMON_MEGA_READY, Arduino is ready
                                 if "ZIMON_MEGA" in line.upper():
                                     # Read one more line (the commands list)
-                                    time.sleep(0.1)
+                                    time.sleep(0.05)  # Reduced from 0.1
                                     try:
                                         s.readline()
                                     except:
                                         pass
                                     break
                             else:
-                                time.sleep(0.05)
+                                time.sleep(0.02)  # Reduced from 0.05
                         else:
-                            time.sleep(0.05)
+                            time.sleep(0.02)  # Reduced from 0.05
                     except Exception as e:
                         LOG.debug("Error reading startup: %s", e)
                         break
@@ -114,85 +115,107 @@ class ArduinoController:
     def connect(self, port: str) -> bool:
         """
         Open and attach to port; perform handshake (PING).
-        If handshake succeeds the Serial is attached to self.ser and self.port set.
+        If handshake succeeds then Serial is attached to self.ser and self.port set.
         
         Args:
             port: Serial port name (e.g., 'COM4')
-            reset_arduino: If True, opens port with DTR which resets Arduino.
-                          If False, tries to connect without resetting (for already-running Arduino)
         """
-        LOG.info("Opening serial %s @ %d (connect)", port, self.baudrate)
+        # Prevent concurrent connection attempts
+        if self._connecting:
+            LOG.warning("Connection already in progress, ignoring request")
+            return False
+            
+        # If already connected to this port, return success
+        if self.is_connected() and self.port == port:
+            LOG.info("Already connected to %s", port)
+            return True
+            
+        # If connected to different port, disconnect first
+        if self.is_connected():
+            LOG.info("Disconnecting from current port before connecting to %s", port)
+            self.close()
+        
+        self._connecting = True
+        try:
+            LOG.info("Opening serial %s @ %d (connect)", port, self.baudrate)
 
-        # try a few times for reliability
-        attempts = 3
-        for attempt in range(1, attempts + 1):
-            s = self._open_for_probe(port)
-            if s is None:
-                time.sleep(0.05)
-                continue
+            # try a few times for reliability
+            attempts = 3
+            for attempt in range(1, attempts + 1):
+                s = self._open_for_probe(port)
+                if s is None:
+                    time.sleep(0.05)
+                    continue
 
-            try:
-                # Make sure buffer is clear
-                s.reset_input_buffer()
-                time.sleep(0.2)
+                try:
+                    # Make sure buffer is clear
+                    s.reset_input_buffer()
+                    time.sleep(0.1)  # Reduced from 0.2
+                    
+                    # Send PING command
+                    s.write(b"PING\n")
+                    s.flush()
+                    LOG.debug("Sent PING to %s", port)
+                except Exception as e:
+                    LOG.debug("Write during handshake failed on %s: %s", port, e)
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+                    continue
+
+                # Wait for reply - Arduino should respond with ZIMON_OK
+                deadline = time.time() + 1.5  # Reduced from 2.0
+                reply_lines = []
+                while time.time() < deadline:
+                    try:
+                        if s.in_waiting > 0:
+                            line = s.readline().decode(errors="ignore").strip()
+                            if line:
+                                reply_lines.append(line)
+                                LOG.debug("Handshake reply from %s: %r", port, line)
+                                # Accept if contains ZIMON_OK (PING response) or ZIMON_MEGA (startup)
+                                if "ZIMON_OK" in line.upper() or "ZIMON_MEGA" in line.upper() or "ZEB" in line.upper():
+                                    LOG.info("Found ZIMON device on %s", port)
+                                    break
+                        else:
+                            time.sleep(0.05)  # Wait for data
+                    except Exception as e:
+                        LOG.debug("Error reading handshake reply: %s", e)
+                        time.sleep(0.05)
+
+                # evaluate replies
+                if reply_lines:
+                    # Check if we got a valid ZIMON response
+                    has_zimon = any("ZIMON_OK" in line.upper() or "ZIMON_MEGA" in line.upper() for line in reply_lines)
+                    if has_zimon:
+                        LOG.info("Handshake reply from %s: %s", port, reply_lines)
+                        # attach serial to controller
+                        self.ser = s
+                        self.port = port
+                        LOG.info("Connected and attached to %s", port)
+                        self._connecting = False
+                        return True
+                    else:
+                        LOG.debug("Got reply but not ZIMON device: %s", reply_lines)
                 
-                # Send PING command
-                s.write(b"PING\n")
-                s.flush()
-                LOG.debug("Sent PING to %s", port)
-            except Exception as e:
-                LOG.debug("Write during handshake failed on %s: %s", port, e)
+                # no valid reply - close and retry
                 try:
                     s.close()
                 except Exception:
                     pass
-                time.sleep(0.1)
-                continue
+                LOG.info("No handshake reply on %s (attempt %d/%d)", port, attempt, attempts)
+                time.sleep(0.1)  # Reduced from 0.2
 
-            # Wait for reply - Arduino should respond with ZIMON_OK
-            deadline = time.time() + 2.0  # Increased timeout
-            reply_lines = []
-            while time.time() < deadline:
-                try:
-                    if s.in_waiting > 0:
-                        line = s.readline().decode(errors="ignore").strip()
-                        if line:
-                            reply_lines.append(line)
-                            LOG.debug("Handshake reply from %s: %r", port, line)
-                            # Accept if contains ZIMON_OK (PING response) or ZIMON_MEGA (startup)
-                            if "ZIMON_OK" in line.upper() or "ZIMON_MEGA" in line.upper() or "ZEB" in line.upper():
-                                LOG.info("Found ZIMON device on %s", port)
-                                break
-                    else:
-                        time.sleep(0.05)  # Wait for data
-                except Exception as e:
-                    LOG.debug("Error reading handshake reply: %s", e)
-                    time.sleep(0.05)
-
-            # evaluate replies
-            if reply_lines:
-                # Check if we got a valid ZIMON response
-                has_zimon = any("ZIMON_OK" in line.upper() or "ZIMON_MEGA" in line.upper() for line in reply_lines)
-                if has_zimon:
-                    LOG.info("Handshake reply from %s: %s", port, reply_lines)
-                    # attach serial to controller
-                    self.ser = s
-                    self.port = port
-                    LOG.info("Connected and attached to %s", port)
-                    return True
-                else:
-                    LOG.debug("Got reply but not ZIMON device: %s", reply_lines)
+            LOG.error("Failed to open serial %s after %d attempts", port, attempts)
+            self._connecting = False
+            return False
             
-            # no valid reply - close and retry
-            try:
-                s.close()
-            except Exception:
-                pass
-            LOG.info("No handshake reply on %s (attempt %d/%d)", port, attempt, attempts)
-            time.sleep(0.2)  # Longer delay between attempts
-
-        LOG.error("Failed to open serial %s after %d attempts", port, attempts)
-        return False
+        except Exception as e:
+            LOG.error("Connection error: %s", e, exc_info=True)
+            self._connecting = False
+            return False
 
     def auto_connect(self) -> bool:
         """
@@ -268,6 +291,7 @@ class ArduinoController:
         return False
 
     def close(self):
+        self._connecting = False  # Reset connection state
         try:
             if self.ser:
                 try:

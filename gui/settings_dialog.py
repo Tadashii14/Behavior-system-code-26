@@ -22,12 +22,12 @@ class SettingsDialog(QDialog):
         # Apply dark theme styling
         self.setStyleSheet("""
             QDialog {
-                background-color: #15171d;
-                color: #e6e6e6;
+                background-color: #0a0b0f;
+                color: #e8e9ea;
             }
             QGroupBox {
-                border: 1px solid #2b2f3a;
-                background: #1c1f26;
+                border: 1px solid #2a2d36;
+                background: #14161a;
                 border-radius: 12px;
                 padding: 16px;
                 margin-top: 8px;
@@ -37,26 +37,27 @@ class SettingsDialog(QDialog):
             QGroupBox::title {
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
-                left: 16px;
+                left: 18px;
                 padding: 0 8px;
                 color: #b8bcc8;
+                background-color: #14161a;
             }
             QLabel {
-                color: #e6e6e6;
+                color: #e8e9ea;
             }
             QComboBox {
-                background: #1d1f26;
-                border: 1px solid #2b2f3a;
+                background: #1a1c21;
+                border: 1px solid #2a2d36;
                 border-radius: 6px;
                 padding: 6px 10px;
-                color: #e6e6e6;
+                color: #e8e9ea;
                 min-height: 28px;
             }
             QComboBox:hover {
-                border-color: #3b3f4a;
+                border-color: #3a3d46;
             }
             QComboBox:focus {
-                border-color: #7c5cff;
+                border-color: #6366f1;
             }
             QComboBox::drop-down {
                 border: none;
@@ -69,43 +70,43 @@ class SettingsDialog(QDialog):
                 border-top: 5px solid #b8bcc8;
             }
             QPushButton {
-                background: #7c5cff;
+                background: #6366f1;
                 color: #ffffff;
                 border: none;
                 border-radius: 8px;
-                padding: 8px 20px;
+                padding: 10px 24px;
                 font-weight: 500;
-                min-height: 32px;
+                min-height: 36px;
             }
             QPushButton:hover {
-                background: #8d6dff;
+                background: #818cf8;
             }
             QPushButton:pressed {
-                background: #6b4ce6;
+                background: #4f46e5;
             }
             QPushButton:disabled {
-                background: #2b2f3a;
-                color: #6c6f7a;
+                background: #2a2d36;
+                color: #7a7d85;
             }
             QLineEdit {
-                background: #1d1f26;
-                border: 1px solid #2b2f3a;
+                background: #1a1c21;
+                border: 1px solid #2a2d36;
                 border-radius: 6px;
                 padding: 6px 10px;
-                color: #e6e6e6;
+                color: #e8e9ea;
                 min-height: 28px;
             }
             QLineEdit:hover {
-                border-color: #3b3f4a;
+                border-color: #3a3d46;
             }
             QLineEdit:focus {
-                border-color: #7c5cff;
-                background: #252830;
+                border-color: #6366f1;
+                background: #24262c;
             }
             QLineEdit:disabled {
-                background: #1a1c22;
-                border-color: #1a1c22;
-                color: #6c6f7a;
+                background: #16181c;
+                border-color: #16181c;
+                color: #7a7d85;
             }
         """)
         

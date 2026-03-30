@@ -1,14 +1,18 @@
-﻿from PyQt6.QtWidgets import (
+from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QTabWidget, QGroupBox, QPushButton,
-    QCheckBox, QSlider, QSpinBox, QColorDialog
+    QCheckBox, QSlider, QSpinBox, QColorDialog, QComboBox, QMessageBox,
+    QStackedWidget, QFrame
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
+from PyQt6.QtGui import QIcon, QImage, QPixmap
 import logging
 import time
+import cv2
+import numpy as np
 from gui.settings_dialog import SettingsDialog
 from gui.analysis_tab import AnalysisTab
+from backend.camera_interface import CameraType
 
 
 class MainWindow(QMainWindow):
@@ -61,127 +65,465 @@ class MainWindow(QMainWindow):
         # Experiment timer
         self.experiment_timer = None
         self.experiment_start_time = None
+        
+        # Camera-related variables
+        self.current_camera = None
+        self.camera_preview_labels = []  # List of all preview labels (one per tab)
+        self.camera_preview_widget = None  # Shared preview widget
+        self.camera_settings_widget = None  # Shared settings widget
+        self.camera_combo = None  # Main camera combo box (first one created)
+        self.camera_combos = []  # List of all camera combo boxes for syncing
+        self.camera_status_label = None
+        self.camera_fps_label = None
+        self.camera_resolution_label = None
+        self.camera_zoom_label = None
+        self.camera_settings_timer = QTimer()
+        self.camera_settings_timer.timeout.connect(self._update_camera_settings_display)
+        self.camera_settings_timer.start(500)  # Update every 500ms
+        
+        # FPS counter variables
+        self.fps_frame_times = []  # List of frame timestamps
+        self.fps_counter_label = None  # FPS overlay label
+        self.current_fps = 0.0
 
         self.setWindowTitle("ZIMON — Behaviour Tracking System")
-        self.resize(1400, 850)
+        self.resize(1400, 900)
         self._build_ui()
-        self._connect_backend()
+        # Start maximized for best experience
+        self.showMaximized()
+        # Optimize loading - start timers after UI is ready
+        QTimer.singleShot(100, self._connect_backend)
+        QTimer.singleShot(200, self._init_camera_list)
+        QTimer.singleShot(300, self._optimize_performance)
+
+    def _optimize_performance(self):
+        """Optimize performance after UI is loaded"""
+        try:
+            # Reduce camera settings update frequency for better performance
+            if hasattr(self, 'camera_settings_timer'):
+                self.camera_settings_timer.setInterval(1000)  # Update every 1 second instead of 500ms
+            
+            # Optimize temperature update frequency
+            if hasattr(self, 'temp_timer'):
+                self.temp_timer.setInterval(3000)  # Update every 3 seconds instead of 2 seconds
+            
+            # Enable hardware acceleration for better rendering
+            self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, False)
+            self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+            
+            self.logger.info("Performance optimizations applied")
+        except Exception as e:
+            self.logger.error(f"Error applying performance optimizations: {e}")
+
+    def _update_camera_settings_display(self):
+        """Update camera settings display labels"""
+        if not self.camera or not self.current_camera:
+            if self.camera_status_label:
+                self.camera_status_label.setText("Not connected")
+            if self.camera_fps_label:
+                self.camera_fps_label.setText("FPS: —")
+            if self.camera_resolution_label:
+                self.camera_resolution_label.setText("Resolution: —")
+            if self.camera_zoom_label:
+                self.camera_zoom_label.setText("Zoom: —")
+            return
+        
+        try:
+            # Update status
+            if self.camera_status_label:
+                self.camera_status_label.setText("Connected")
+            
+            # Update FPS
+            if self.camera_fps_label:
+                current_fps = self.camera.get_current_fps(self.current_camera)
+                if current_fps:
+                    self.camera_fps_label.setText(f"FPS: {current_fps:.1f}")
+                else:
+                    self.camera_fps_label.setText("FPS: —")
+            
+            # Update Resolution
+            if self.camera_resolution_label:
+                resolution = self.camera.get_resolution(self.current_camera)
+                if resolution:
+                    w, h = resolution
+                    self.camera_resolution_label.setText(f"Resolution: {w}x{h}")
+                else:
+                    self.camera_resolution_label.setText("Resolution: —")
+            
+            # Update Zoom
+            if self.camera_zoom_label:
+                zoom = self.camera.get_setting(self.current_camera, "zoom")
+                if zoom:
+                    self.camera_zoom_label.setText(f"Zoom: {zoom:.1f}x")
+                else:
+                    self.camera_zoom_label.setText("Zoom: —")
+                    
+        except Exception as e:
+            self.logger.error(f"Error updating camera settings display: {e}")
+
+    def _restart_preview_with_new_resolution(self, camera_name: str):
+        """Restart camera preview with new resolution - non-blocking"""
+        try:
+            if self.camera.start_preview(camera_name, self._update_camera_frame):
+                self.logger.info(f"Restarted preview for {camera_name} with new resolution")
+            else:
+                self.logger.error(f"Failed to restart preview for {camera_name}")
+        except Exception as e:
+            self.logger.error(f"Error restarting preview: {e}")
 
     # ---------- UI ROOT ----------
     def _build_ui(self):
         central = QWidget()
-        root = QVBoxLayout(central)
-        root.setContentsMargins(20, 16, 20, 16)
-        root.setSpacing(12)
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        root.addLayout(self._build_header())
-        root.addWidget(self._build_tabs(), 1)
+        # Left sidebar
+        root.addWidget(self._build_sidebar())
+        
+        # Main content area
+        main_area = QWidget()
+        main_layout = QVBoxLayout(main_area)
+        main_layout.setContentsMargins(16, 12, 16, 12)
+        main_layout.setSpacing(10)
+        
+        # Small top header
+        main_layout.addLayout(self._build_header())
+        
+        # Stacked widget for pages (instead of tabs)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._environment_tab())
+        self.pages.addWidget(self._experiment_tab())
+        self.pages.addWidget(self._placeholder_tab("Presets"))
+        self.analysis_tab = AnalysisTab(self.zebrazoom)
+        self.pages.addWidget(self.analysis_tab)
+        
+        main_layout.addWidget(self.pages, 1)
+        root.addWidget(main_area, 1)
 
         self.setCentralWidget(central)
+
+    # ---------- SIDEBAR ----------
+    def _build_sidebar(self):
+        sidebar = QFrame()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(80)  # Increased width for better layout
+        sidebar.setStyleSheet("""
+            QFrame#Sidebar {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #1a1d23, stop:1 #0d0f13);
+                border-right: 2px solid #2a2d36;
+            }
+        """)
+        
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(10, 20, 10, 20)
+        layout.setSpacing(12)
+        
+        # Logo section at top
+        logo_container = QFrame()
+        logo_container.setStyleSheet("""
+            QFrame {
+                background: transparent;
+                border: none;
+            }
+        """)
+        logo_layout = QVBoxLayout(logo_container)
+        logo_layout.setContentsMargins(0, 0, 0, 0)
+        logo_layout.setSpacing(8)
+        
+        # Modern logo with better icon
+        logo = QLabel("🧬")
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo.setStyleSheet("""
+            QLabel {
+                font-size: 36px;
+                padding: 12px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 #6366f1, stop:1 #8b5cf6);
+                border-radius: 20px;
+                color: white;
+                font-weight: bold;
+            }
+        """)
+        logo_layout.addWidget(logo)
+        
+        # App name with better styling
+        app_name = QLabel("ZIMON")
+        app_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        app_name.setStyleSheet("""
+            QLabel {
+                color: #ffffff;
+                font-size: 14px;
+                font-weight: 700;
+                padding: 8px 4px;
+                background: rgba(99, 102, 241, 0.15);
+                border-radius: 8px;
+                border: 1px solid rgba(99, 102, 241, 0.3);
+                letter-spacing: 2px;
+            }
+        """)
+        logo_layout.addWidget(app_name)
+        
+        layout.addWidget(logo_container)
+        
+        # Separator with better styling
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 transparent, stop:0.5 #2a2d36, stop:1 transparent);
+                max-height: 2px;
+                border: none;
+            }
+        """)
+        layout.addWidget(sep)
+        
+        layout.addSpacing(16)
+        
+        # Navigation buttons with better design
+        self.nav_buttons = []
+        nav_items = [
+            ("🏠", "Home", "Environment", 0),
+            ("🧪", "Lab", "Experiment", 1),
+            ("💾", "Save", "Presets", 2),
+            ("📊", "Data", "Analysis", 3),
+        ]
+        
+        for icon, short_name, tooltip, page_idx in nav_items:
+            # Create button container for better layout
+            btn_container = QFrame()
+            btn_container.setStyleSheet("QFrame { background: transparent; border: none; }")
+            btn_layout = QVBoxLayout(btn_container)
+            btn_layout.setContentsMargins(0, 0, 0, 0)
+            btn_layout.setSpacing(4)
+            
+            btn = QPushButton(icon)
+            btn.setToolTip(tooltip)
+            btn.setFixedSize(56, 56)  # Larger, more touch-friendly
+            btn.setCheckable(True)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 255, 255, 0.05);
+                    border: 2px solid rgba(255, 255, 255, 0.1);
+                    border-radius: 14px;
+                    font-size: 24px;
+                    color: #b8bcc8;
+                    font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: rgba(99, 102, 241, 0.15);
+                    border: 2px solid rgba(99, 102, 241, 0.4);
+                    color: #ffffff;
+                }
+                QPushButton:checked {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
+                        stop:0 #6366f1, stop:1 #8b5cf6);
+                    border: 2px solid #6366f1;
+                    color: #ffffff;
+                    font-weight: bold;
+                }
+                QPushButton:pressed {
+                    background: rgba(79, 70, 229, 0.8);
+                    border: 2px solid #4f46e5;
+                }
+            """)
+            btn.clicked.connect(lambda checked, idx=page_idx: self._switch_page(idx))
+            btn_layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignCenter)
+            
+            # Add label below icon
+            label = QLabel(short_name)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setStyleSheet("""
+                QLabel {
+                    color: #7a7d85;
+                    font-size: 10px;
+                    font-weight: 600;
+                    padding: 2px;
+                }
+            """)
+            btn_layout.addWidget(label)
+            
+            layout.addWidget(btn_container, 0, Qt.AlignmentFlag.AlignCenter)
+            self.nav_buttons.append(btn)
+        
+        # Select first button by default
+        if self.nav_buttons:
+            self.nav_buttons[0].setChecked(True)
+        
+        layout.addStretch()
+        
+        # Bottom section with settings
+        bottom_container = QFrame()
+        bottom_container.setStyleSheet("QFrame { background: transparent; border: none; }")
+        bottom_layout = QVBoxLayout(bottom_container)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(12)
+        
+        # Settings button with better design
+        settings_btn = QPushButton("⚙️")
+        settings_btn.setToolTip("Settings")
+        settings_btn.setFixedSize(56, 56)
+        settings_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(148, 163, 184, 0.1);
+                border: 2px solid rgba(148, 163, 184, 0.2);
+                border-radius: 14px;
+                font-size: 22px;
+                color: #94a3b8;
+                font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(99, 102, 241, 0.15);
+                border: 2px solid rgba(99, 102, 241, 0.4);
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background: rgba(79, 70, 229, 0.3);
+                border: 2px solid #4f46e5;
+            }
+        """)
+        settings_btn.clicked.connect(self._show_settings)
+        bottom_layout.addWidget(settings_btn, 0, Qt.AlignmentFlag.AlignCenter)
+        
+        # Settings label
+        settings_label = QLabel("Settings")
+        settings_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        settings_label.setStyleSheet("""
+            QLabel {
+                color: #7a7d85;
+                font-size: 10px;
+                font-weight: 600;
+                padding: 2px;
+            }
+        """)
+        bottom_layout.addWidget(settings_label)
+        
+        layout.addWidget(bottom_container)
+        
+        return sidebar
+    
+    def _switch_page(self, index):
+        """Switch to a page and update nav button states"""
+        self.pages.setCurrentIndex(index)
+        for i, btn in enumerate(self.nav_buttons):
+            btn.setChecked(i == index)
+        
+        # Update page title
+        titles = ["Environment", "Experiment", "Presets", "Analysis"]
+        if hasattr(self, 'page_title') and index < len(titles):
+            self.page_title.setText(titles[index])
 
     # ---------- HEADER ----------
     def _build_header(self):
         layout = QHBoxLayout()
         layout.setSpacing(12)
-        layout.setContentsMargins(0, 0, 0, 4)
+        layout.setContentsMargins(0, 0, 0, 8)
 
-        title = QLabel("ZIMON")
-        title.setObjectName("Title")
-
-        subtitle = QLabel("Behaviour Tracking System")
-        subtitle.setObjectName("Subtitle")
-
-        left = QVBoxLayout()
-        left.setSpacing(2)
-        left.setContentsMargins(0, 0, 0, 0)
-        left.addWidget(title)
-        left.addWidget(subtitle)
-
-        layout.addLayout(left)
+        # Page title (changes based on current page)
+        self.page_title = QLabel("Environment")
+        self.page_title.setStyleSheet("""
+            QLabel {
+                font-size: 22px;
+                font-weight: 700;
+                color: #ffffff;
+                padding: 8px 12px;
+                background: rgba(99, 102, 241, 0.1);
+                border-radius: 8px;
+                border-left: 3px solid #6366f1;
+            }
+        """)
+        layout.addWidget(self.page_title)
+        
         layout.addStretch()
         
         # Arduino connection status
-        status_label = QLabel("Arduino: Checking...")
+        status_label = QLabel("🔌 Arduino: Checking...")
         status_label.setObjectName("ArduinoStatus")
-        status_label.setStyleSheet("color: #9aa0aa; font-size: 11px; padding: 4px 8px;")
-        self.arduino_status_label = status_label
-        layout.addWidget(status_label)
-        
-        # Settings button
-        settings_btn = QPushButton("⚙")
-        settings_btn.setObjectName("SettingsButton")
-        settings_btn.setStyleSheet("""
-            QPushButton#SettingsButton {
-                background: transparent;
-                border: 1px solid #2b2f3a;
-                border-radius: 6px;
+        status_label.setStyleSheet("""
+            QLabel {
+                color: #94a3b8;
+                font-size: 11px;
                 padding: 6px 12px;
-                font-size: 18px;
-                color: #b8bcc8;
-                min-width: 36px;
-                max-width: 36px;
-            }
-            QPushButton#SettingsButton:hover {
-                background: #252830;
-                border-color: #7c5cff;
-                color: #ffffff;
-            }
-            QPushButton#SettingsButton:pressed {
-                background: #1d1f26;
+                background: rgba(148, 163, 184, 0.1);
+                border: 1px solid rgba(148, 163, 184, 0.2);
+                border-radius: 6px;
             }
         """)
-        settings_btn.setToolTip("Settings")
-        settings_btn.clicked.connect(self._show_settings)
-        layout.addWidget(settings_btn)
+        self.arduino_status_label = status_label
+        layout.addWidget(status_label)
 
         return layout
 
-    # ---------- TABS ----------
-    def _build_tabs(self):
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self._environment_tab(), "Environment")
-        self.tabs.addTab(self._experiment_tab(), "Experiment")
-        self.tabs.addTab(self._placeholder_tab("Presets"), "Presets")
-        
-        # Analysis tab with ZebraZoom integration
-        self.analysis_tab = AnalysisTab(self.zebrazoom)
-        self.tabs.addTab(self.analysis_tab, "Analysis")
-        
-        return self.tabs
-
     # ---------- ENVIRONMENT TAB ----------
     def _environment_tab(self):
+        from PyQt6.QtWidgets import QSizePolicy, QScrollArea
+        
+        # Create scroll area for the entire tab
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 8, 0, 0)
-        layout.setSpacing(14)
+        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setSpacing(10)
 
-        # Top row: Camera preview (smaller) and settings side by side
+        # Top row: Camera preview and settings side by side
         top = QHBoxLayout()
         top.setSpacing(14)
-        top.addWidget(self._camera_preview_box(), 1)  # Reduced from 2 to 1
-        top.addWidget(self._camera_settings_box(), 1)
+        
+        # Create camera widgets for this tab
+        camera_preview = self._camera_preview_box()
+        camera_settings = self._camera_settings_box()
+        
+        # Set maximum height for camera preview to leave room for controls
+        camera_preview.setMaximumHeight(450)
+        
+        top.addWidget(camera_preview, 3)
+        top.addWidget(camera_settings, 2)
 
         layout.addLayout(top)
-        layout.addWidget(self._environment_controls(), 0)
+        layout.addWidget(self._environment_controls())
 
-        return page
+        scroll.setWidget(page)
+        return scroll
 
     # ---------- EXPERIMENT TAB ----------
     def _experiment_tab(self):
+        from PyQt6.QtWidgets import QSizePolicy, QScrollArea
+        
+        # Create scroll area for the entire tab
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 8, 0, 0)
-        layout.setSpacing(14)
+        layout.setContentsMargins(0, 8, 0, 8)
+        layout.setSpacing(10)
 
         # Top section: Camera and experiment status side by side
         top_section = QHBoxLayout()
         top_section.setSpacing(14)
-        top_section.addWidget(self._camera_preview_box(), 1)
-        top_section.addWidget(self._experiment_status_box(), 1)
+        
+        # Create camera preview widget (shares preview label reference)
+        camera_preview = self._camera_preview_box()
+        experiment_status = self._experiment_status_box()
+        
+        # Set maximum height for camera preview
+        camera_preview.setMaximumHeight(400)
+        
+        top_section.addWidget(camera_preview, 3)
+        top_section.addWidget(experiment_status, 2)
 
         layout.addLayout(top_section)
-        layout.addWidget(self._stimuli_controls(), 0)
+        layout.addWidget(self._stimuli_controls())
 
         # Action buttons with experiment info
         actions_container = QGroupBox("Experiment Control")
@@ -193,7 +535,7 @@ class MainWindow(QMainWindow):
         timer_layout = QHBoxLayout()
         timer_layout.setSpacing(10)
         self.experiment_timer_label = QLabel("Duration: 00:00")
-        self.experiment_timer_label.setStyleSheet("color: #9aa0aa; font-size: 13px;")
+        self.experiment_timer_label.setStyleSheet("color: #a0a4ac; font-size: 13px;")
         timer_layout.addWidget(self.experiment_timer_label)
         timer_layout.addStretch()
         actions_layout.addLayout(timer_layout)
@@ -220,36 +562,138 @@ class MainWindow(QMainWindow):
         actions_layout.addLayout(actions)
         layout.addWidget(actions_container)
 
-        return page
+        scroll.setWidget(page)
+        return scroll
 
     # ---------- CAMERA ----------
     def _camera_preview_box(self):
+        from PyQt6.QtWidgets import QSizePolicy
         box = QGroupBox("Camera Preview")
+        box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(box)
         layout.setContentsMargins(12, 20, 12, 12)
         layout.setSpacing(8)
 
-        preview = QLabel("Camera feed placeholder")
+        # Camera selection - always create new combo for this widget (Qt limitation)
+        # But sync selection across all combos
+        camera_select_layout = QHBoxLayout()
+        camera_select_label = QLabel("Camera:")
+        camera_select_label.setStyleSheet("color: #e8e9ea;")
+        
+        # Create combo box for this widget - use simple native style
+        camera_combo = QComboBox()
+        camera_combo.setMinimumWidth(250)
+        camera_combo.setMinimumHeight(30)
+        camera_combo.setMaxVisibleItems(10)
+        camera_combo.setEditable(False)
+        camera_combo.currentIndexChanged.connect(lambda idx: self._on_camera_selected(camera_combo.currentText()) if idx >= 0 else None)
+        
+        # Store reference to main combo (first one created) and add to list
+        self.camera_combos.append(camera_combo)
+        if self.camera_combo is None:
+            self.camera_combo = camera_combo
+            self.logger.info(f"Set main camera_combo reference")
+        
+        # Sync with existing cameras if available
+        if self.camera and self.camera.list_cameras():
+            cameras = self.camera.list_cameras()
+            camera_combo.blockSignals(True)
+            camera_combo.clear()
+            camera_combo.addItems(cameras)
+            if self.current_camera and self.current_camera in cameras:
+                index = camera_combo.findText(self.current_camera)
+                if index >= 0:
+                    camera_combo.setCurrentIndex(index)
+            camera_combo.blockSignals(False)
+            self.logger.info(f"Synced new combo with {len(cameras)} cameras")
+        
+        # Refresh button
+        refresh_btn = QPushButton("🔄")
+        refresh_btn.setToolTip("Refresh camera list")
+        refresh_btn.setStyleSheet("""
+            QPushButton {
+                background: #1a1c21;
+                border: 1px solid #2a2d36;
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: #e8e9ea;
+                min-width: 30px;
+                max-width: 30px;
+            }
+            QPushButton:hover {
+                background: #24262c;
+                border-color: #6366f1;
+                color: #ffffff;
+            }
+        """)
+        refresh_btn.clicked.connect(self._refresh_camera_list)
+        
+        camera_select_layout.addWidget(camera_select_label)
+        camera_select_layout.addWidget(camera_combo, 1)
+        camera_select_layout.addWidget(refresh_btn)
+        layout.addLayout(camera_select_layout)
+
+        # Preview container with FPS overlay
+        preview_container = QWidget()
+        preview_container.setObjectName("CameraPreviewContainer")
+        preview_container.setStyleSheet("""
+            QWidget#CameraPreviewContainer {
+                background: #0d0f13;
+                border: 1px solid #2a2d36;
+                border-radius: 12px;
+            }
+        """)
+        preview_container_layout = QVBoxLayout(preview_container)
+        preview_container_layout.setContentsMargins(0, 0, 0, 0)
+        preview_container_layout.setSpacing(0)
+        
+        # Preview label - create new and add to list
+        preview = QLabel("No camera selected")
         preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         preview.setObjectName("CameraPlaceholder")
-        preview.setMinimumHeight(200)  # Reduced from 300 to 200
-        preview.setMaximumHeight(250)  # Add max height for better proportions
-
-        layout.addWidget(preview, 1)
+        preview.setMinimumHeight(250)
+        preview.setScaledContents(False)  # We handle scaling manually
+        # Add to list of preview labels so we can update all of them
+        self.camera_preview_labels.append(preview)
+        preview_container_layout.addWidget(preview, 1)
+        
+        # FPS counter overlay (positioned absolutely over preview)
+        if not self.fps_counter_label:
+            fps_counter = QLabel("FPS: 0.0", preview_container)
+            fps_counter.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+            fps_counter.setStyleSheet("""
+                QLabel {
+                    color: #22d3ee;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 2px 6px;
+                    background: rgba(0, 0, 0, 180);
+                    border-radius: 4px;
+                }
+            """)
+            fps_counter.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.fps_counter_label = fps_counter
+        
+        layout.addWidget(preview_container, 1)
+        
         return box
 
     def _camera_settings_box(self):
+        from PyQt6.QtWidgets import QSizePolicy
         box = QGroupBox("Camera Settings")
+        # Use Preferred vertical policy so it doesn't stretch excessively
+        box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(box)
         layout.setContentsMargins(12, 20, 12, 12)
-        layout.setSpacing(10)
+        layout.setSpacing(8)  # Reduced spacing
 
         # Camera status indicator
         status_layout = QHBoxLayout()
         status_indicator = QLabel("●")
-        status_indicator.setStyleSheet("color: #4fc3f7; font-size: 12px;")
-        status_text = QLabel("Ready")
-        status_text.setStyleSheet("color: #b8bcc8; font-weight: 500;")
+        status_indicator.setStyleSheet("color: #22d3ee; font-size: 12px;")
+        status_text = QLabel("Not connected")
+        status_text.setStyleSheet("color: #e8e9ea; font-weight: 500;")
+        self.camera_status_label = status_text
         status_layout.addWidget(status_indicator)
         status_layout.addWidget(status_text)
         status_layout.addStretch()
@@ -257,40 +701,93 @@ class MainWindow(QMainWindow):
 
         # Separator
         separator = QLabel("")
-        separator.setStyleSheet("background: #2b2f3a; min-height: 1px; max-height: 1px;")
+        separator.setStyleSheet("background: #2a2d36; min-height: 1px; max-height: 1px;")
         layout.addWidget(separator)
 
-        # Camera parameters
-        fps_label = QLabel("FPS: —")
-        exposure_label = QLabel("Exposure: —")
-        gain_label = QLabel("Gain: —")
-        resolution_label = QLabel("Resolution: —")
+        # Current settings display (hide exposure/gain since using auto mode)
+        self.camera_fps_label = QLabel("FPS: —")
+        self.camera_resolution_label = QLabel("Resolution: —")
+        self.camera_zoom_label = QLabel("Zoom: —")
         
-        # Style the labels for better readability
-        for label in [fps_label, exposure_label, gain_label, resolution_label]:
-            label.setStyleSheet("padding: 6px 0px; color: #e6e6e6;")
+        for label in [self.camera_fps_label, self.camera_resolution_label, self.camera_zoom_label]:
+            label.setStyleSheet("padding: 6px 0px; color: #e8e9ea; font-size: 11px;")
         
-        layout.addWidget(fps_label)
-        layout.addWidget(exposure_label)
-        layout.addWidget(gain_label)
-        layout.addWidget(resolution_label)
-        layout.addStretch()
+        layout.addWidget(self.camera_fps_label)
+        layout.addWidget(self.camera_resolution_label)
+        layout.addWidget(self.camera_zoom_label)
+        
+        # Separator
+        separator2 = QLabel("")
+        separator2.setStyleSheet("background: #2a2d36; min-height: 1px; max-height: 1px; margin-top: 8px;")
+        layout.addWidget(separator2)
 
+        # Controls
+        controls_label = QLabel("Controls:")
+        controls_label.setStyleSheet("color: #e8e9ea; font-weight: 500; margin-top: 8px;")
+        layout.addWidget(controls_label)
+
+        # FPS control
+        fps_layout = QHBoxLayout()
+        fps_layout.addWidget(QLabel("FPS:"))
+        self.fps_spinbox = QSpinBox()
+        self.fps_spinbox.setRange(1, 120)
+        self.fps_spinbox.setValue(60)  # Changed default from 30 to 60
+        self.fps_spinbox.setEnabled(False)
+        self.fps_spinbox.valueChanged.connect(self._on_fps_changed)
+        fps_layout.addWidget(self.fps_spinbox)
+        layout.addLayout(fps_layout)
+
+        # Zoom control
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addWidget(QLabel("Zoom:"))
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setRange(50, 200)  # 0.5x to 2.0x zoom
+        self.zoom_slider.setValue(100)  # 1.0x default
+        self.zoom_slider.setEnabled(False)
+        self.zoom_slider.valueChanged.connect(self._on_zoom_changed)
+        zoom_layout.addWidget(self.zoom_slider)
+        self.zoom_label = QLabel("1.0x")
+        zoom_layout.addWidget(self.zoom_label)
+        layout.addLayout(zoom_layout)
+
+        # Resolution control
+        resolution_layout = QHBoxLayout()
+        resolution_layout.addWidget(QLabel("Resolution:"))
+        self.resolution_combo = QComboBox()
+        self.resolution_combo.addItems([
+            "640x480",
+            "800x600",
+            "1024x768",
+            "1280x720",
+            "1280x1024",
+            "1920x1080",
+            "2048x1536"
+        ])
+        self.resolution_combo.setEnabled(False)
+        self.resolution_combo.currentTextChanged.connect(self._on_resolution_changed)
+        self.resolution_combo.setMaxVisibleItems(10)  # Show up to 10 items in dropdown
+        resolution_layout.addWidget(self.resolution_combo)
+        layout.addLayout(resolution_layout)
+
+        # No stretch - content should stay compact at top
         return box
     
     def _experiment_status_box(self):
         """Create experiment status/info panel"""
+        from PyQt6.QtWidgets import QSizePolicy
         box = QGroupBox("Experiment Status")
+        # Preferred vertical so it doesn't stretch excessively
+        box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout = QVBoxLayout(box)
         layout.setContentsMargins(12, 20, 12, 12)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         # Status indicator
         status_layout = QHBoxLayout()
         self.experiment_status_indicator = QLabel("●")
-        self.experiment_status_indicator.setStyleSheet("color: #9aa0aa; font-size: 14px;")
+        self.experiment_status_indicator.setStyleSheet("color: #a0a4ac; font-size: 14px;")
         self.experiment_status_text = QLabel("Not Running")
-        self.experiment_status_text.setStyleSheet("color: #b8bcc8; font-weight: 600; font-size: 13px;")
+        self.experiment_status_text.setStyleSheet("color: #e8e9ea; font-weight: 600; font-size: 13px;")
         status_layout.addWidget(self.experiment_status_indicator)
         status_layout.addWidget(self.experiment_status_text)
         status_layout.addStretch()
@@ -298,32 +795,31 @@ class MainWindow(QMainWindow):
 
         # Separator
         separator = QLabel("")
-        separator.setStyleSheet("background: #2b2f3a; min-height: 1px; max-height: 1px;")
+        separator.setStyleSheet("background: #2a2d36; min-height: 1px; max-height: 1px;")
         layout.addWidget(separator)
 
         # Active stimuli
         stimuli_label = QLabel("Active Stimuli:")
-        stimuli_label.setStyleSheet("color: #9aa0aa; font-size: 12px; padding-top: 4px;")
+        stimuli_label.setStyleSheet("color: #a0a4ac; font-size: 12px; padding-top: 4px;")
         layout.addWidget(stimuli_label)
         
         self.active_stimuli_list = QLabel("None")
-        self.active_stimuli_list.setStyleSheet("color: #e6e6e6; font-size: 11px; padding-left: 8px;")
+        self.active_stimuli_list.setStyleSheet("color: #e8e9ea; font-size: 11px; padding-left: 8px;")
         self.active_stimuli_list.setWordWrap(True)
         layout.addWidget(self.active_stimuli_list)
 
         # Recording status
         recording_layout = QHBoxLayout()
         recording_label = QLabel("Recording:")
-        recording_label.setStyleSheet("color: #9aa0aa; font-size: 12px;")
+        recording_label.setStyleSheet("color: #a0a4ac; font-size: 12px;")
         self.recording_status = QLabel("● Not Recording")
-        self.recording_status.setStyleSheet("color: #d04f4f; font-size: 11px;")
+        self.recording_status.setStyleSheet("color: #dc2626; font-size: 11px;")
         recording_layout.addWidget(recording_label)
         recording_layout.addWidget(self.recording_status)
         recording_layout.addStretch()
         layout.addLayout(recording_layout)
 
-        layout.addStretch()
-
+        # No vertical stretch - content stays compact at top
         return box
 
     # ---------- ENVIRONMENT CONTROLS ----------
@@ -335,7 +831,7 @@ class MainWindow(QMainWindow):
 
         # Add a quick info header
         info_header = QLabel("Control environmental conditions for consistent experiments")
-        info_header.setStyleSheet("color: #9aa0aa; font-size: 11px; padding-bottom: 4px;")
+        info_header.setStyleSheet("color: #a0a4ac; font-size: 11px; padding-bottom: 8px;")
         layout.addWidget(info_header)
 
         layout.addLayout(self._slider_row("IR Light"))
@@ -344,7 +840,7 @@ class MainWindow(QMainWindow):
 
         # Separator before temperature
         separator = QLabel("")
-        separator.setStyleSheet("background: #2b2f3a; min-height: 1px; max-height: 1px; margin: 8px 0;")
+        separator.setStyleSheet("background: #2a2d36; min-height: 1px; max-height: 1px; margin: 8px 0;")
         layout.addWidget(separator)
 
         # Temperature display with icon-like styling
@@ -353,7 +849,7 @@ class MainWindow(QMainWindow):
         temp_icon = QLabel("🌡")
         temp_icon.setStyleSheet("font-size: 16px; padding-right: 4px;")
         temp = QLabel("Temperature:")
-        temp.setStyleSheet("color: #b8bcc8; font-weight: 500;")
+        temp.setStyleSheet("color: #e8e9ea; font-weight: 500;")
         temp_value = QLabel("-- °C")
         temp_value.setObjectName("Temperature")
         temp_container.addWidget(temp_icon)
@@ -550,43 +1046,16 @@ class MainWindow(QMainWindow):
             self._update_arduino_status(False, "Not initialized")
             return
         
-        # Check connection status - try a test command first
-        # Sometimes is_connected() returns False even when working
-        is_actually_connected = False
-        
-        # First check the obvious way
+        # Check if already connected (non-blocking check only)
         if self.arduino.is_connected():
-            # If is_connected() says True, trust it (commands are working)
-            is_actually_connected = True
-        
-        if not is_actually_connected:
-            # Try to auto-connect if not already connected
-            self.logger.info("Attempting to auto-connect Arduino...")
-            self._update_arduino_status(False, "Connecting...")
-            try:
-                if self.arduino.auto_connect():
-                    self.logger.info("Arduino auto-connected successfully")
-                    # Test connection with a STATUS command
-                    try:
-                        reply = self.arduino.send("STATUS")
-                        self.logger.info(f"Connection test: STATUS -> {reply}")
-                        port = getattr(self.arduino, 'port', 'Unknown')
-                        self._update_arduino_status(True, f"Connected ({port})")
-                    except Exception as e:
-                        self.logger.warning(f"Connection test failed: {e}")
-                        # Still mark as connected if auto_connect succeeded
-                        port = getattr(self.arduino, 'port', 'Unknown')
-                        self._update_arduino_status(True, f"Connected ({port})")
-                else:
-                    self.logger.warning("Arduino auto-connect failed - check if Arduino is connected and firmware is loaded")
-                    self._update_arduino_status(False, "Not connected")
-            except Exception as e:
-                self.logger.error(f"Error during auto-connect: {e}", exc_info=True)
-                self._update_arduino_status(False, f"Error: {str(e)[:30]}")
-        else:
-            self.logger.info("Arduino already connected")
             port = getattr(self.arduino, 'port', 'Unknown')
+            self.logger.info("Arduino already connected")
             self._update_arduino_status(True, f"Connected ({port})")
+        else:
+            # Don't auto-connect on startup to avoid blocking UI
+            # User can connect manually via Settings
+            self.logger.info("Arduino not connected - use Settings to connect")
+            self._update_arduino_status(False, "Not connected")
     
     def _show_settings(self):
         """Show settings dialog"""
@@ -717,14 +1186,10 @@ class MainWindow(QMainWindow):
             return
             
         if not self.arduino.is_connected():
-            self.logger.warning("Arduino not connected - attempting reconnect...")
-            try:
-                if not self.arduino.auto_connect():
-                    self.logger.error("Failed to reconnect Arduino")
-                    return
-            except Exception as e:
-                self.logger.error(f"Reconnect error: {e}")
-                return
+            self.logger.warning("Arduino not connected - please connect via Settings")
+            # Update status to show user needs to connect
+            self._update_arduino_status(False, "Not connected - use Settings")
+            return
         
         pwm_value = self._map_to_pwm(value_0_100)
         
@@ -940,3 +1405,561 @@ class MainWindow(QMainWindow):
             minutes = int(elapsed // 60)
             seconds = int(elapsed % 60)
             self.experiment_timer_label.setText(f"Duration: {minutes:02d}:{seconds:02d}")
+    
+    # ---------- CAMERA METHODS ----------
+    def _init_camera_list(self):
+        """Initialize camera list in combo box"""
+        self.logger.info("_init_camera_list called")
+        self.logger.info(f"camera_combos list has {len(self.camera_combos)} items")
+        
+        if not self.camera:
+            self.logger.warning("Camera controller not available")
+            for combo in self.camera_combos:
+                if combo:
+                    combo.clear()
+                    combo.addItem("Camera controller not available")
+            return
+        
+        # Use camera_combos list instead of single camera_combo reference
+        if not self.camera_combos:
+            self.logger.warning("No camera combo boxes found")
+            return
+        
+        cameras = self.camera.list_cameras()
+        self.logger.info(f"Cameras found: {cameras}")
+        
+        # Update ALL camera combo boxes
+        for combo in self.camera_combos:
+            if combo:
+                combo.blockSignals(True)
+                combo.clear()
+                if cameras:
+                    combo.addItems(cameras)
+                else:
+                    combo.addItem("No cameras found")
+                combo.blockSignals(False)
+        
+        if cameras:
+            self.logger.info(f"Added {len(cameras)} cameras to {len(self.camera_combos)} combo boxes")
+            
+            # Set main reference if not set
+            if not self.camera_combo and self.camera_combos:
+                self.camera_combo = self.camera_combos[0]
+            
+            # Auto-select first camera
+            for combo in self.camera_combos:
+                if combo:
+                    combo.setCurrentIndex(0)
+            
+            self._on_camera_selected(cameras[0])
+        else:
+            self.logger.warning("No cameras detected. Make sure your webcam is connected and not in use by another application.")
+    
+    def _refresh_camera_list(self):
+        """Refresh camera list"""
+        if not self.camera or not self.camera_combo:
+            return
+        
+        self.logger.info("Refreshing camera list...")
+        
+        # Stop current preview
+        if self.current_camera:
+            self.camera.stop_preview(self.current_camera)
+            self.current_camera = None
+        
+        # Refresh camera detection
+        self.camera.refresh_cameras()
+        
+        # Update all combo boxes
+        cameras = self.camera.list_cameras()
+        for combo in self.camera_combos:
+            if combo:
+                combo.blockSignals(True)
+                combo.clear()
+                if cameras:
+                    combo.addItems(cameras)
+                else:
+                    combo.addItem("No cameras found")
+                combo.blockSignals(False)
+        
+        if cameras:
+            self.logger.info(f"Found {len(cameras)} cameras: {cameras}")
+            # Auto-select first camera
+            if self.camera_combo:
+                self.camera_combo.setCurrentIndex(0)
+                self._on_camera_selected(cameras[0])
+        else:
+            self.logger.warning("No cameras found after refresh")
+    
+    def _sync_all_camera_combos(self):
+        """Sync all camera combo boxes with main combo"""
+        if not self.camera_combo:
+            return
+        
+        cameras = [self.camera_combo.itemText(i) for i in range(self.camera_combo.count())]
+        current_text = self.camera_combo.currentText()
+        
+        for combo in self.camera_combos:
+            if combo and combo != self.camera_combo:
+                combo.blockSignals(True)
+                combo.clear()
+                combo.addItems(cameras)
+                index = combo.findText(current_text)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+    
+    def _on_camera_selected(self, camera_name: str):
+        """Handle camera selection"""
+        if not self.camera or not camera_name or camera_name == "No cameras found" or camera_name == "Camera controller not available":
+            return
+
+        # Stop previous preview cleanly
+        if self.current_camera and self.current_camera != camera_name:
+            self.camera.stop_preview(self.current_camera)
+            time.sleep(0.2)
+
+        self.current_camera = camera_name
+        resolutions = []
+        # Dynamically check resolutions for webcam
+        cam_info = self.camera.cameras.get(camera_name)
+        if cam_info and cam_info["type"] == CameraType.WEBCAM:
+            resolutions = self.camera.get_supported_resolutions(camera_name)
+            resolutions = [f"{w}x{h}" for (w, h) in resolutions]
+        elif cam_info and cam_info["type"] == CameraType.BASLER:
+            # Just use the known safe presets for basler
+            resolutions = [
+                "640x480", "800x600", "1024x768", "1280x720", "1280x960",
+                "1280x1024", "1600x1200", "1920x1080", "2048x1536"
+            ]
+
+        # Update the combo box
+        if hasattr(self, 'resolution_combo'):
+            self.resolution_combo.blockSignals(True)
+            self.resolution_combo.clear()
+            if resolutions:
+                for r in resolutions:
+                    self.resolution_combo.addItem(r)
+                # Default to 1280x1024 for Basler, highest for webcam
+                if cam_info and cam_info["type"] == CameraType.BASLER:
+                    default_index = resolutions.index("1280x1024") if "1280x1024" in resolutions else 0
+                else:
+                    default_index = 0  # Highest resolution for webcam
+                self.resolution_combo.setCurrentIndex(default_index)
+            else:
+                self.resolution_combo.addItem("1280x1024")
+                self.resolution_combo.setCurrentIndex(0)
+            self.resolution_combo.setEnabled(True)
+            self.resolution_combo.blockSignals(False)
+
+        # Set and store this resolution as current before preview
+        if hasattr(self, 'resolution_combo') and self.resolution_combo.count() > 0:
+            default_res = self.resolution_combo.currentText()
+            if default_res:
+                parts = default_res.split('x')
+                if len(parts) == 2:
+                    w, h = int(parts[0]), int(parts[1])
+                    self.camera.set_setting(camera_name, "resolution", (w, h))
+
+        # Start preview
+        # Disable UI controls during start
+        if hasattr(self, 'resolution_combo'):
+            self.resolution_combo.setEnabled(False)
+        if hasattr(self, 'fps_spinbox'):
+            self.fps_spinbox.setEnabled(False)
+        if hasattr(self, 'zoom_slider'):
+            self.zoom_slider.setEnabled(False)
+        
+        # Start preview first, then disable controller controls
+        if self.camera.start_preview(camera_name, self._update_camera_frame):
+            self.logger.info(f"Started preview for {camera_name}")
+            # Enable controls after successful start
+            self.fps_spinbox.setEnabled(True)
+            self.zoom_slider.setEnabled(True)
+            self.resolution_combo.setEnabled(True)
+
+            # Load current settings
+            if self.camera:
+                fps = self.camera.get_setting(camera_name, "fps") or 60  # Changed fallback from 30 to 60
+                zoom = self.camera.get_setting(camera_name, "zoom") or 1.0
+                self.fps_spinbox.setValue(int(fps))
+                self.zoom_slider.setValue(int(zoom * 100))
+        else:
+            self.logger.error(f"Failed to start preview for {camera_name}")
+            # Re-enable controls on failure
+            if hasattr(self, 'resolution_combo'):
+                self.resolution_combo.setEnabled(True)
+            if hasattr(self, 'fps_spinbox'):
+                self.fps_spinbox.setEnabled(True)
+            if hasattr(self, 'zoom_slider'):
+                self.zoom_slider.setEnabled(True)
+
+    
+    def _update_camera_frame(self, frame: np.ndarray):
+        """Update camera preview with new frame - optimized for performance"""
+        if not self.camera_preview_labels:
+            return
+        
+        try:
+            # Limit UI updates to ~30 FPS for smooth performance
+            current_time = time.time()
+            if not hasattr(self, '_last_ui_update'):
+                self._last_ui_update = 0
+            
+            if current_time - self._last_ui_update < 0.033:  # ~30 FPS UI update
+                return
+            self._last_ui_update = current_time
+            
+            # Simple FPS counter
+            self.fps_frame_times.append(current_time)
+            self.fps_frame_times = [t for t in self.fps_frame_times[-30:] if current_time - t < 1.0]
+            
+            if len(self.fps_frame_times) > 1:
+                time_span = self.fps_frame_times[-1] - self.fps_frame_times[0]
+                self.current_fps = len(self.fps_frame_times) / time_span if time_span > 0 else 0
+            
+            # Update FPS label
+            if self.fps_counter_label:
+                self.fps_counter_label.setText(f"FPS: {self.current_fps:.1f}")
+            
+            # Convert frame to RGB - handle different camera formats
+            try:
+                if frame is None:
+                    return
+                    
+                # Handle different frame formats from different cameras
+                if len(frame.shape) == 2:
+                    # Grayscale frame - convert to RGB
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+                elif len(frame.shape) == 3:
+                    if frame.shape[2] == 3:
+                        # BGR frame - convert to RGB
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    elif frame.shape[2] == 4:
+                        # BGRA frame - convert to RGB
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+                    else:
+                        # Unknown format, use as-is
+                        rgb_frame = frame
+                else:
+                    # Unknown format, use as-is
+                    rgb_frame = frame
+                    
+            except Exception as e:
+                self.logger.error(f"Error converting frame format: {e}, frame shape: {frame.shape if frame is not None else 'None'}")
+                return
+            
+            # Get first visible preview label
+            preview_label = None
+            for label in self.camera_preview_labels:
+                if label and label.isVisible():
+                    preview_label = label
+                    break
+            
+            if preview_label is None:
+                return
+            
+            # Cache label dimensions to avoid repeated calls
+            if not hasattr(self, '_cached_label_size') or self._cached_label_size != (preview_label.width(), preview_label.height()):
+                self._cached_label_size = (preview_label.width(), preview_label.height())
+                self._cached_scaled_size = (
+                    max(preview_label.width(), 320),
+                    max(preview_label.height(), 240)
+                )
+            
+            # Create QImage directly from numpy array - robust error handling
+            try:
+                h, w = rgb_frame.shape[:2]
+                
+                # Determine bytes per line based on frame format
+                if len(rgb_frame.shape) == 3:
+                    bytes_per_line = w * rgb_frame.shape[2]
+                else:
+                    bytes_per_line = w * 3  # Default to 3 channels
+                
+                # Use ascontiguousarray to ensure memory layout
+                rgb_frame_contiguous = np.ascontiguousarray(rgb_frame)
+                
+                # Create QImage with error checking
+                if len(rgb_frame_contiguous.shape) == 3 and rgb_frame_contiguous.shape[2] == 3:
+                    qt_image = QImage(rgb_frame_contiguous.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                elif len(rgb_frame_contiguous.shape) == 2:
+                    # Grayscale
+                    qt_image = QImage(rgb_frame_contiguous.data, w, h, bytes_per_line, QImage.Format.Format_Grayscale8)
+                else:
+                    # Fallback format
+                    qt_image = QImage(rgb_frame_contiguous.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                
+                if qt_image.isNull():
+                    self.logger.warning(f"Failed to create QImage from frame shape: {rgb_frame_contiguous.shape}")
+                    return
+                
+                # Scale pixmap once using cached size and zoom
+                # Get current zoom setting
+                zoom = self.camera.get_setting(self.current_camera, "zoom") if self.camera and self.current_camera else 1.0
+                zoom = zoom if zoom is not None else 1.0
+                
+                # Apply zoom to scaling
+                scaled_width = int(self._cached_scaled_size[0] * zoom)
+                scaled_height = int(self._cached_scaled_size[1] * zoom)
+                
+                scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
+                    scaled_width,
+                    scaled_height,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation
+                )
+                
+                # Update label
+                preview_label.setPixmap(scaled_pixmap)
+                
+            except Exception as e:
+                self.logger.error(f"Error creating QImage from frame: {e}, frame shape: {rgb_frame.shape if rgb_frame is not None else 'None'}")
+                return
+            
+        except Exception as e:
+            self.logger.error(f"Error updating camera frame: {e}")
+    
+    def _on_fps_changed(self, value: int):
+        """Handle FPS change - uses CameraController safety"""
+        if not self.current_camera or not self.camera:
+            return
+        
+        # Check if controls are disabled at controller level
+        if self.camera.are_ui_controls_disabled():
+            return
+        
+        # Disable control during operation
+        self.fps_spinbox.setEnabled(False)
+        
+        # Set setting through controller (will check safety)
+        if self.camera.set_setting(self.current_camera, "fps", value):
+            self.logger.info(f"FPS changed to {value}")
+        
+        # Re-enable control after a short delay
+        QTimer.singleShot(200, lambda: self.fps_spinbox.setEnabled(True))
+    
+    def _on_zoom_changed(self, value: int):
+        """Handle zoom change - uses CameraController safety"""
+        zoom_value = value / 100.0
+        if hasattr(self, 'zoom_value_label') and self.zoom_value_label:
+            self.zoom_value_label.setText(f"{zoom_value:.1f}x")
+        
+        if not self.current_camera or not self.camera:
+            return
+        
+        # Check if controls are disabled at controller level
+        if self.camera.are_ui_controls_disabled():
+            return
+        
+        # Disable control during operation
+        self.zoom_slider.setEnabled(False)
+        
+        # Set setting through controller (will check safety)
+        if self.camera.set_setting(self.current_camera, "zoom", zoom_value):
+            self.logger.info(f"Zoom changed to {zoom_value}")
+        self.zoom_slider.setEnabled(True)
+
+    def _on_resolution_changed(self, resolution_str: str):
+        """Handle resolution change - now supports Basler cameras"""
+        if not self.current_camera or not self.camera:
+            return
+        
+        # Check if controls are disabled at controller level
+        if self.camera.are_ui_controls_disabled():
+            return
+        
+        # Check camera type
+        camera_name = self.current_camera
+        cam_info = self.camera.cameras.get(camera_name)
+        
+        # For Basler cameras, log that we're attempting resolution change
+        if cam_info and cam_info.get("type") == CameraType.BASLER:
+            self.logger.info(f"Attempting Basler resolution change to {resolution_str}")
+        elif cam_info and cam_info.get("type") == CameraType.WEBCAM:
+            self.logger.info(f"Setting webcam resolution to {resolution_str}")
+        
+        # Disable control during operation to prevent rapid changes
+        self.resolution_combo.setEnabled(False)
+        
+        try:
+            # Parse resolution string (e.g., "1920x1080")
+            parts = resolution_str.split("x")
+            if len(parts) != 2:
+                return
+                
+            width = int(parts[0])
+            height = int(parts[1])
+            
+            # Set setting through controller (will check safety and Basler protection)
+            if self.camera.set_setting(camera_name, "resolution", (width, height)):
+                self.logger.info(f"Resolution changed to {width}x{height}")
+                
+                # Stop current preview
+                self.camera.stop_preview(camera_name)
+                
+                # Restart preview with new resolution after short delay
+                QTimer.singleShot(100, lambda: self._restart_preview_with_new_resolution(camera_name))
+            else:
+                self.logger.warning("Resolution change rejected by CameraController")
+            
+        except Exception as e:
+            self.logger.error(f"Error changing resolution: {e}")
+        finally:
+            # Re-enable control after operation
+            QTimer.singleShot(500, lambda: self.resolution_combo.setEnabled(True))
+
+
+def _update_camera_frame(self, frame: np.ndarray):
+    """Update camera preview with new frame - optimized for performance"""
+    if not self.camera_preview_labels:
+        return
+    
+    try:
+        # Process all frames for accurate FPS counting
+        current_time = time.time()
+        
+        # Simple FPS counter
+        self.fps_frame_times.append(current_time)
+        self.fps_frame_times = [t for t in self.fps_frame_times[-60:] if current_time - t < 1.0]
+        
+        if len(self.fps_frame_times) > 1:
+            time_span = self.fps_frame_times[-1] - self.fps_frame_times[0]
+            self.current_fps = len(self.fps_frame_times) / time_span if time_span > 0 else 0
+        
+        # Update FPS label
+        if self.fps_counter_label:
+            self.fps_counter_label.setText(f"FPS: {self.current_fps:.1f}")
+        
+        # Convert frame to RGB - handle different camera formats (optimized for speed)
+        try:
+            if frame is None:
+                return
+                
+            # Handle different frame formats from different cameras
+            if len(frame.shape) == 2:
+                # Grayscale frame - convert to RGB (faster for Basler Mono8)
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+            elif len(frame.shape) == 3:
+                if frame.shape[2] == 3:
+                    # BGR frame - convert to RGB
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                elif frame.shape[2] == 4:
+                    # BGRA frame - convert to RGB
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+                else:
+                    # Unknown format, use as-is
+                    rgb_frame = frame
+            else:
+                # Unknown format, use as-is
+                rgb_frame = frame
+                
+        except Exception as e:
+            self.logger.error(f"Error converting frame format: {e}, frame shape: {frame.shape if frame is not None else 'None'}")
+            return
+        
+        # Get first visible preview label
+        preview_label = None
+        for label in self.camera_preview_labels:
+            if label and label.isVisible():
+                preview_label = label
+                break
+        
+        if preview_label is None:
+            return
+        
+        # Cache label dimensions to avoid repeated calls
+        if not hasattr(self, '_cached_label_size') or self._cached_label_size != (preview_label.width(), preview_label.height()):
+            self._cached_label_size = (preview_label.width(), preview_label.height())
+            self._cached_scaled_size = (
+                max(preview_label.width(), 320),
+                max(preview_label.height(), 240)
+            )
+        
+        # Create QImage directly from numpy array - optimized for high FPS
+        try:
+            h, w = rgb_frame.shape[:2]
+            
+            # Determine bytes per line based on frame format
+            if len(rgb_frame.shape) == 3:
+                bytes_per_line = w * rgb_frame.shape[2]
+            else:
+                bytes_per_line = w * 3  # Default to 3 channels
+            
+            # Use ascontiguousarray to ensure memory layout (faster for high FPS)
+            rgb_frame_contiguous = np.ascontiguousarray(rgb_frame)
+            
+            # Create QImage with error checking
+            if len(rgb_frame_contiguous.shape) == 3 and rgb_frame_contiguous.shape[2] == 3:
+                qt_image = QImage(rgb_frame_contiguous.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            elif len(rgb_frame_contiguous.shape) == 2:
+                # Grayscale
+                qt_image = QImage(rgb_frame_contiguous.data, w, h, bytes_per_line, QImage.Format.Format_Grayscale8)
+            else:
+                # Fallback format
+                qt_image = QImage(rgb_frame_contiguous.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            
+            if qt_image.isNull():
+                self.logger.warning(f"Failed to create QImage from frame shape: {rgb_frame_contiguous.shape}")
+                return
+            
+            # Scale pixmap once using cached size and zoom
+            # Get current zoom setting
+            zoom = self.camera.get_setting(self.current_camera, "zoom") if self.camera and self.current_camera else 1.0
+            zoom = zoom if zoom is not None else 1.0
+            
+            # Apply zoom to scaling
+            scaled_width = int(self._cached_scaled_size[0] * zoom)
+            scaled_height = int(self._cached_scaled_size[1] * zoom)
+            
+            # Use FastTransformation for high FPS
+            scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
+                scaled_width,
+                scaled_height,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation
+            )
+            
+            # Update label
+            preview_label.setPixmap(scaled_pixmap)
+            
+        except Exception as e:
+            self.logger.error(f"Error creating QImage from frame: {e}, frame shape: {rgb_frame.shape if rgb_frame is not None else 'None'}")
+            return
+        
+    except Exception as e:
+        self.logger.error(f"Error updating camera frame: {e}")
+    
+    def _restart_preview_with_new_resolution(self, camera_name: str):
+        """Restart camera preview with new resolution - non-blocking"""
+        try:
+            if self.camera.start_preview(camera_name, self._update_camera_frame):
+                self.logger.info(f"Restarted preview for {camera_name} with new resolution")
+            else:
+                self.logger.error(f"Failed to restart preview for {camera_name}")
+        except Exception as e:
+            self.logger.error(f"Error restarting preview: {e}")
+    
+    def _update_resolution_display(self):
+        """Update resolution display after change"""
+        if self.current_camera and self.camera:
+            resolution = self.camera.get_resolution(self.current_camera)
+            if resolution and self.camera_resolution_label:
+                w, h = resolution
+                self.camera_resolution_label.setText(f"Resolution: {w}x{h}")
+                # Update combo box to show actual resolution
+                if hasattr(self, 'resolution_combo'):
+                    resolution_str = f"{w}x{h}"
+                    self.resolution_combo.blockSignals(True)
+                    index = self.resolution_combo.findText(resolution_str)
+                    if index >= 0:
+                        self.resolution_combo.setCurrentIndex(index)
+                    else:
+                        # Add if not in list
+                        self.resolution_combo.addItem(resolution_str)
+                        self.resolution_combo.setCurrentText(resolution_str)
+                    self.resolution_combo.blockSignals(False)
+
+
+# End of MainWindow class
+            
