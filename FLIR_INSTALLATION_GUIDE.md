@@ -1,203 +1,142 @@
-# FLIR SDK Installation Guide
-# Step-by-step installation for FLIR CM3-U3-13Y3M-CS thermal camera
+# FLIR Camera Installation Guide
 
-## 🔍 Current Status Check
+## 🚨 **PROBLEM IDENTIFIED**
 
-### 1. Verify Current Installation
-```powershell
-# Check if FLIR Spinnaker is installed
-Get-ChildItem -Path 'C:\Program Files' -Recurse -ErrorAction SilentlyContinue | Where-Object {$_.Name -like '*FLIR*'} | Select-Object Name
+Your FLIR camera is not detected in ZIMON because **PySpin Python bindings are not installed**, even though FLIR SpinView works.
 
-# Check Python path
-python -c "import sys; print('\\n'.join(sys.path))"
+## 🔍 **Root Cause**
+
+- ✅ FLIR SpinView works (standalone application)
+- ❌ PySpin Python bindings missing (required for ZIMON)
+- ❌ FLIR Spinnaker SDK not installed with Python support
+
+## 📋 **SOLUTION: Install FLIR Spinnaker SDK**
+
+### **Step 1: Download FLIR Spinnaker SDK**
+1. Go to: https://www.flir.com/support-center/downloads/spinnaker/
+2. Select: Windows 64-bit
+3. Download: Latest Spinnaker SDK (version 1.26.0 or later)
+
+### **Step 2: Install with Python Bindings (CRITICAL)**
+1. **Right-click** the installer and **"Run as administrator"**
+2. Select **"Custom"** installation (NOT "Typical")
+3. **IMPORTANT**: Check **"Python Bindings"** option
+4. Ensure installation includes Python components
+5. Complete the installation
+
+### **Step 3: Verify Installation**
+Open Command Prompt and run:
+```bash
+python -c "import PySpin; print('PySpin version:', PySpin.__version__)"
 ```
 
-### 2. Check PySpin Availability
-```python
-python -c "try: import PySpin; print('✅ PySpin available'); except ImportError as e: print(f'❌ PySpin not available: {e}')"
+Expected output:
+```
+PySpin version: 1.26.0.123
 ```
 
-## 📦 FLIR SDK Installation Steps
+### **Step 4: Test with ZIMON**
+1. Launch ZIMON application
+2. Check camera dropdown
+3. FLIR camera should appear as: `FLIR_[Model]_[Serial]`
 
-### Option 1: Download from FLIR Website (Recommended)
-1. **Download FLIR Spinnaker SDK**
-   - Go to: https://www.flir.com/support-center/downloads/spinnaker/
-   - Download: Spinnaker SDK for Windows (64-bit)
-   - Version: 1.26.0 or later
+## 🔧 **Troubleshooting**
 
-2. **Install with Python Bindings**
-   - Run installer as Administrator
-   - Select "Custom" installation
-   - Ensure "Python Bindings" option is checked
-   - Install to: `C:\Program Files\FLIR Systems\Spinnaker\Development\bin\Python`
-
-3. **Verify Installation**
-   ```powershell
-   # Check if PySpin.dll exists
-   dir "C:\Program Files\FLIR Systems\Spinnaker\Development\bin\Python" | findstr PySpin
+### **If PySpin Import Fails**
+1. **Check FLIR Installation Path**:
+   ```
+   C:\Program Files\FLIR Systems\Spinnaker\Development\bin\Python
    ```
 
-### Option 2: Manual Installation
-1. **Extract SDK Files**
-   - Download Spinnaker SDK zip file
-   - Extract to temporary folder
-   - Copy Python bindings to system path
+2. **Add to System PATH**:
+   - Go to System Properties → Environment Variables
+   - Add to PATH: `C:\Program Files\FLIR Systems\Spinnaker\Development\bin\Python`
 
-2. **Add to Python Path**
-   ```powershell
-   # Add FLIR Python path to environment
-   $env:Path += ";C:\Program Files\FLIR Systems\Spinnaker\Development\bin\Python"
-   
-   # Or add permanently
-   [System.Environment]::SetEnvironmentVariable('Path', $env:Path, 'Machine')
+3. **Alternative Path**:
+   ```
+   C:\Program Files (x86)\FLIR Systems\Spinnaker\Development\bin\Python
    ```
 
-3. **Copy Required Files**
-   ```powershell
-   # Copy PySpin.py and PySpin.dll to Python site-packages
-   copy "C:\FLIR_SDK\Python\PySpin.py" "C:\Python313\Lib\site-packages\"
-   copy "C:\FLIR_SDK\bin\PySpin.dll" "C:\Python313\Lib\site-packages\"
-   ```
+### **If Camera Still Not Detected**
+1. **Check USB Connection**:
+   - Use USB3 port (not USB2)
+   - Try different USB3 port
+   - Check cable is securely connected
 
-## 🔧 Configuration After Installation
+2. **Check Device Manager**:
+   - Look for FLIR camera under "Imaging devices"
+   - Ensure drivers are properly installed
 
-### 1. Update Python Path
-```python
-import sys
-sys.path.insert(0, r"C:\Program Files\FLIR Systems\Spinnaker\Development\bin\Python")
+3. **Close Other Applications**:
+   - Close FLIR SpinView
+   - Close other camera software
+   - Restart ZIMON
+
+4. **Restart Computer**:
+   - Sometimes requires restart after SDK installation
+
+## 🧪 **Testing Tools**
+
+### **Simple Test Script**
+Run the provided test script:
+```bash
+python test_flir_camera.py
 ```
 
-### 2. Test Installation
-```python
-python -c "
-try:
-    import PySpin
-    print('✅ FLIR SDK installed successfully')
-    print(f'PySpin version: {PySpin.__version__}')
-except ImportError as e:
-    print(f'❌ FLIR SDK not available: {e}')
-except Exception as e:
-    print(f'❌ FLIR SDK error: {e}')
-"
+This will:
+- Test PySpin import
+- Detect FLIR cameras
+- Provide troubleshooting guidance
+
+### **ZIMON Integration Test**
+After PySpin installation:
+```bash
+python main.py
 ```
+Check camera dropdown for FLIR camera.
 
-## 🚀 Quick Installation Script
+## 📋 **Important Notes**
 
-### Automated Installation
-```powershell
-# Save as install_flir.ps1 and run as Administrator
-$flirPath = "C:\Program Files\FLIR Systems\Spinnaker\Development\bin\Python"
+### **Why SpinView Works But ZIMON Doesn't**
+- **SpinView**: Standalone FLIR application
+- **ZIMON**: Python application requiring PySpin bindings
+- **Solution**: Install FLIR Spinnaker SDK with Python bindings
 
-# Check if already installed
-if (Test-Path $flirPath) {
-    Write-Host "✅ FLIR SDK already installed at $flirPath" -ForegroundColor Green
-} else {
-    Write-Host "❌ FLIR SDK not found at $flirPath" -ForegroundColor Red
-    Write-Host "Please download and install FLIR Spinnaker SDK from:" -ForegroundColor Yellow
-    Write-Host "https://www.flir.com/support-center/downloads/spinnaker/" -ForegroundColor Cyan
-}
-```
+### **Installation Requirements**
+- Windows 10/11 64-bit
+- Administrator privileges
+- USB3 connection for FLIR camera
+- Python 3.8+ (already installed)
 
-## 🔍 Troubleshooting
+### **Camera Compatibility**
+Ensure your FLIR camera model supports Spinnaker SDK:
+- Most USB3 FLIR cameras are supported
+- Check FLIR website for compatibility
+- CM3-U3-13Y3M-CS is fully supported
 
-### Common Issues and Solutions
+## 🎯 **Expected Result**
 
-#### Issue: "PySpin not available"
-**Causes:**
-- FLIR SDK not installed
-- Python path not updated
-- Wrong architecture (32-bit vs 64-bit)
+After successful installation:
+- ✅ PySpin imports without errors
+- ✅ FLIR camera appears in ZIMON dropdown
+- ✅ Camera preview works in ZIMON
+- ✅ Full thermal imaging capabilities available
 
-**Solutions:**
-1. Verify FLIR installation path
-2. Check Python architecture (`python -c "import platform; print(platform.architecture())"`)
-3. Reinstall FLIR SDK with Python bindings
-4. Add FLIR path to PYTHONPATH environment variable
+## 📞 **Support Resources**
 
-#### Issue: "FLIR camera not detected"
-**Causes:**
-- Camera not connected to USB3 port
-- Driver not installed
-- Camera in use by another application
-
-**Solutions:**
-1. Check Device Manager for FLIR camera
-2. Try different USB3 port
-3. Restart camera (unplug/replug)
-4. Close other camera applications
-
-#### Issue: "ImportError: DLL load failed"
-**Causes:**
-- Missing Visual C++ Redistributable
-- Corrupted installation
-- Architecture mismatch
-
-**Solutions:**
-1. Install Visual C++ Redistributable 2019+
-2. Reinstall FLIR SDK as Administrator
-3. Check Windows Event Viewer for errors
-
-## 📋 Installation Verification Checklist
-
-### ✅ Pre-Installation
-- [ ] Windows 10/11 (64-bit)
-- [ ] Administrator privileges
-- [ ] FLIR CM3-U3-13Y3M-CS camera
-- [ ] USB3 cable and port
-
-### ✅ Installation
-- [ ] Downloaded FLIR Spinnaker SDK 1.26.0+
-- [ ] Ran installer as Administrator
-- [ ] Selected Python bindings option
-- [ ] Installation to default path
-
-### ✅ Post-Installation
-- [ ] PySpin.dll exists in installation path
-- [ ] PySpin.py accessible from Python
-- [ ] Python path includes FLIR directory
-- [ ] Import test passes
-- [ ] Camera detection test passes
-
-## 🎯 Next Steps
-
-### After Installation
-1. **Install Requirements**: `pip install -r requirements.txt`
-2. **Run Test**: `python test_flir_integration.py`
-3. **Launch Application**: `python main.py`
-4. **Verify Camera**: Check if FLIR camera appears in camera list
-
-### Integration Verification
-```python
-# Test complete integration
-python -c "
-from backend.camera_interface import CameraController
-controller = CameraController()
-cameras = controller.list_cameras()
-flir_cameras = [name for name in cameras if 'FLIR' in name]
-print(f'Found {len(flir_cameras)} FLIR cameras: {flir_cameras}')
-"
-```
-
-## 📞 Support Resources
-
-### FLIR Documentation
-- **SDK Manual**: Included with Spinnaker installation
-- **API Reference**: FLIR Spinnaker API documentation
-- **Camera Manual**: CM3-U3-13Y3M-CS user guide
-
-### Community Support
-- **FLIR Forums**: https://www.flir.com/support/forums/
-- **Spinnaker GitHub**: https://github.com/FLIR/Spinnaker-Python
-- **Stack Overflow**: Tag questions with `flir` and `spinnaker`
+- **FLIR Download Page**: https://www.flir.com/support-center/downloads/spinnaker/
+- **FLIR Documentation**: https://www.flir.com/support/
+- **Spinnaker SDK Guide**: Included with installation
+- **Test Script**: `test_flir_camera.py`
 
 ---
 
-## 🏆 Installation Complete!
+## 🚀 **Quick Start Summary**
 
-Once FLIR SDK is properly installed and PySpin is importable:
-1. The ZIMON application will automatically detect FLIR cameras
-2. FLIR cameras will have highest priority in camera selection
-3. Full thermal imaging capabilities will be available
-4. Production-ready performance optimization will be active
+1. **Download**: FLIR Spinnaker SDK from FLIR website
+2. **Install**: As Administrator with Python bindings
+3. **Verify**: `python -c "import PySpin; print(PySpin.__version__)"`
+4. **Test**: `python test_flir_camera.py`
+5. **Launch**: `python main.py` and check camera dropdown
 
-**Ready for thermal imaging integration!** 🎯
+**Your FLIR camera should appear in ZIMON after completing these steps!** 🎯

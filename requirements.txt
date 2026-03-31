@@ -14,9 +14,22 @@ pyserial>=3.5
 
 # Camera Support
 pypylon>=1.7.0              # Basler cameras (optional)
-Spinnaker>=1.26.0           # FLIR cameras (optional)
+
+# FLIR Camera Support - MANUAL INSTALLATION REQUIRED
+# IMPORTANT: PySpin is NOT available via pip
+# You MUST install FLIR Spinnaker SDK from:
+# https://www.flir.com/support-center/downloads/spinnaker/
+# During installation, select "Custom" and check "Python Bindings"
+# After installation, PySpin will be available automatically
 
 # Development & Testing (optional)
 pytest>=6.0.0
 black>=21.0.0
 flake8>=4.0.0
+
+# FLIR Installation Notes:
+# 1. Download Spinnaker SDK from FLIR website
+# 2. Install as Administrator with Python bindings
+# 3. Verify: python -c "import PySpin; print(PySpin.__version__)"
+# 4. Restart ZIMON application
+# 5. FLIR camera should appear in dropdown
