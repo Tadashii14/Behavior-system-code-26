@@ -11,6 +11,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("zimon_app")
 
+from version import __version__
+
 # imports
 from gui.loading_screen import LoadingScreen
 from gui.main_window import MainWindow
@@ -24,7 +26,7 @@ MAIN_WINDOW = None
 
 
 def main():
-    logger.info("Starting ZIMON application")
+    logger.info("Starting ZIMON application (v%s — Version 1 baseline)", __version__)
 
     app = QApplication(sys.argv)
 

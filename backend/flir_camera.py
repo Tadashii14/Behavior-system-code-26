@@ -174,8 +174,11 @@ class FLIRCameraWorker(QThread):
                 self.logger.error("No FLIR cameras found")
                 return False
             
-            # Use first camera (or match by serial if available)
-            self.camera = camera_list[0]
+            # Pick camera by detected index if provided; fallback to first
+            cam_index = int(self.camera_info.get("index", 0)) if isinstance(self.camera_info, dict) else 0
+            if cam_index < 0 or cam_index >= camera_list.GetSize():
+                cam_index = 0
+            self.camera = camera_list.GetByIndex(cam_index)
             self.camera.Init()
             
             # Log camera information for debugging
@@ -240,9 +243,13 @@ class FLIRCameraWorker(QThread):
                 self.logger.debug("FLIR: Auto exposure disabled")
             
             # Disable auto gain
-            if hasattr(self.camera, 'GainAuto') and self.camera.GainAuto.GetAccessMode() != PySpin.AccessMode_RW:
-                self.camera.GainAuto.SetValue(PySpin.GainAuto_Off)
-                self.logger.debug("FLIR: Auto gain disabled")
+            if hasattr(self.camera, 'GainAuto'):
+                try:
+                    # PySpin access-mode constants vary by version; prefer best-effort sets.
+                    self.camera.GainAuto.SetValue(PySpin.GainAuto_Off)
+                    self.logger.debug("FLIR: Auto gain disabled")
+                except Exception:
+                    pass
             
             # Disable auto white balance (if available)
             if hasattr(self.camera, 'BalanceWhiteAuto'):
@@ -260,20 +267,21 @@ class FLIRCameraWorker(QThread):
     def _configure_pixel_format(self):
         """Configure pixel format for fastest acquisition"""
         try:
-            # Try Mono8 first (fastest)
-            if PySpin.PixelFormat_Mono8 in self.camera.PixelFormat.GetSymbolics():
+            # Avoid GetSymbolics() here: signature differs across PySpin builds.
+            # Best-effort: prefer Mono8 (fast), fallback to Mono16.
+            try:
                 self.camera.PixelFormat.SetValue(PySpin.PixelFormat_Mono8)
                 self.logger.info("FLIR: Pixel format set to Mono8")
-            # Fallback to Mono16
-            elif PySpin.PixelFormat_Mono16 in self.camera.PixelFormat.GetSymbolics():
+                return
+            except Exception:
+                pass
+
+            try:
                 self.camera.PixelFormat.SetValue(PySpin.PixelFormat_Mono16)
                 self.logger.info("FLIR: Pixel format set to Mono16")
-            else:
-                # Use first available format
-                available_formats = self.camera.PixelFormat.GetSymbolics()
-                if available_formats:
-                    self.camera.PixelFormat.SetValue(available_formats[0])
-                    self.logger.info(f"FLIR: Pixel format set to {available_formats[0]}")
+                return
+            except Exception:
+                pass
                     
         except Exception as e:
             self.logger.error(f"Error configuring FLIR pixel format: {e}")
@@ -335,14 +343,9 @@ class FLIRCameraWorker(QThread):
     def _configure_packet_size(self):
         """Configure packet size for USB3 optimization"""
         try:
-            # Auto-detect optimal packet size
-            if hasattr(self.camera, 'DeviceStreamThroughputLimit'):
-                # Let camera auto-detect optimal packet size
-                self.camera.DeviceStreamThroughputLimit.SetValue(PySpin.DeviceStreamThroughputLimit_Optimal)
-                self.logger.info("FLIR: Packet size set to Optimal")
-            elif hasattr(self.camera, 'DeviceLinkThroughputLimit'):
-                self.camera.DeviceLinkThroughputLimit.SetValue(PySpin.DeviceLinkThroughputLimit_Optimal)
-                self.logger.info("FLIR: Link throughput set to Optimal")
+            # PySpin constants for "optimal" differ across versions/cameras.
+            # Best-effort: don't force a value; leave driver defaults.
+            return
                 
         except Exception as e:
             self.logger.warning(f"Error configuring FLIR packet size: {e}")
@@ -355,9 +358,12 @@ class FLIRCameraWorker(QThread):
             # Set resolution
             resolution = settings.get("resolution", (640, 480))
             if hasattr(self.camera, 'Width') and hasattr(self.camera, 'Height'):
-                self.camera.Width.SetValue(resolution[0])
-                self.camera.Height.SetValue(resolution[1])
-                self.logger.info(f"FLIR: Resolution set to {resolution[0]}x{resolution[1]}")
+                try:
+                    self.camera.Width.SetValue(resolution[0])
+                    self.camera.Height.SetValue(resolution[1])
+                    self.logger.info(f"FLIR: Resolution set to {resolution[0]}x{resolution[1]}")
+                except Exception as e:
+                    self.logger.debug(f"FLIR: Resolution not writable / not supported: {e}")
             
             # Set frame rate
             fps = settings.get("fps", 30)
@@ -401,7 +407,7 @@ class FLIRCameraWorker(QThread):
             self.logger.error(f"FLIR: Failed to start acquisition: {e}")
             return False
     
-    def _get_next_image(self, timeout: float = 0.001) -> Optional[np.ndarray]:
+    def _get_next_image(self, timeout: float = 0.1) -> Optional[np.ndarray]:
         """
         Get next image from camera with non-blocking behavior.
         
@@ -413,13 +419,12 @@ class FLIRCameraWorker(QThread):
         """
         try:
             with self._acquisition_lock:
-                # Check if image is available
-                if not self.camera.GetNumReadyImages():
-                    return None
-                
-                # Get next image with timeout
+                # PySpin expects timeout in milliseconds (int)
+                timeout_ms = max(1, int(timeout * 1000))
+
+                # Get next image with short timeout
                 try:
-                    result = self.camera.GetNextImage(timeout)
+                    result = self.camera.GetNextImage(timeout_ms)
                     if result and result.IsIncomplete():
                         # Incomplete image - increment dropped counter
                         with self._stats_lock:
@@ -443,12 +448,12 @@ class FLIRCameraWorker(QThread):
                     return image_data
                     
                 except PySpin.SpinnakerException as e:
-                    if e.error_code == PySpin.SpinnakerException.TIMEOUT:
-                        # Timeout is normal - no image available
-                        return None
-                    else:
-                        self.logger.warning(f"FLIR image retrieval error: {e}")
-                        return None
+                    # Timeout is normal for non-blocking reads; other errors we log once in a while.
+                    # Spinnaker exception API varies; safest is to treat exceptions as "no frame".
+                    msg = str(e)
+                    if "Timeout" not in msg and "timeout" not in msg:
+                        self.logger.debug(f"FLIR image retrieval error: {e}")
+                    return None
                         
         except Exception as e:
             self.logger.error(f"FLIR get next image error: {e}")
@@ -459,6 +464,11 @@ class FLIRCameraWorker(QThread):
         Convert FLIR image to numpy array efficiently.
         """
         try:
+            # Fast path if available (PySpin provides this in many builds)
+            if hasattr(image, "GetNDArray"):
+                arr = image.GetNDArray()
+                return arr
+
             # Get image dimensions and data
             width = image.GetWidth()
             height = image.GetHeight()
@@ -482,10 +492,18 @@ class FLIRCameraWorker(QThread):
             else:
                 # Fallback conversion for other formats
                 converted_image = image.Convert(PySpin.PixelFormat_Mono8)
-                data_ptr = converted_image.GetData()
-                buffer_size = width * height
-                numpy_array = np.frombuffer(data_ptr, dtype=np.uint8, count=buffer_size)
-                return numpy_array.reshape((height, width))
+                try:
+                    if hasattr(converted_image, "GetNDArray"):
+                        return converted_image.GetNDArray()
+                    data_ptr = converted_image.GetData()
+                    buffer_size = width * height
+                    numpy_array = np.frombuffer(data_ptr, dtype=np.uint8, count=buffer_size)
+                    return numpy_array.reshape((height, width))
+                finally:
+                    try:
+                        converted_image.Release()
+                    except Exception:
+                        pass
                 
         except Exception as e:
             self.logger.error(f"FLIR numpy conversion error: {e}")
@@ -530,17 +548,12 @@ class FLIRCameraWorker(QThread):
             sensor_width = self.camera.SensorWidth.GetValue()
             sensor_height = self.camera.SensorHeight.GetValue()
             
-            # Get supported formats and modes
-            pixel_formats = [str(fmt) for fmt in self.camera.PixelFormat.GetSymbolics()]
-            acquisition_modes = [str(mode) for mode in self.camera.AcquisitionMode.GetSymbolics()]
-            
             self.logger.info(f"FLIR Camera Info:")
             self.logger.info(f"  Model: {model}")
             self.logger.info(f"  Serial: {serial}")
             self.logger.info(f"  Firmware: {firmware}")
             self.logger.info(f"  Sensor: {sensor_width}x{sensor_height}")
-            self.logger.info(f"  Pixel Formats: {len(pixel_formats)} available")
-            self.logger.info(f"  Acquisition Modes: {len(acquisition_modes)} available")
+            # Avoid GetSymbolics() here: signature differs across PySpin builds.
             
         except Exception as e:
             self.logger.warning(f"Error logging FLIR camera info: {e}")
@@ -580,22 +593,44 @@ class FLIRCameraWorker(QThread):
     def update_fps(self, fps: int):
         """Update target FPS during runtime"""
         try:
-            if self.camera and hasattr(self.camera, 'AcquisitionFrameRate'):
-                self.camera.AcquisitionFrameRate.SetValue(fps)
+            if not self.camera:
+                return
+
+            # 0 = unlimited / free-run (disable rate limiting if supported)
+            if int(fps) == 0:
+                if hasattr(self.camera, 'AcquisitionFrameRateEnable'):
+                    try:
+                        self.camera.AcquisitionFrameRateEnable.SetValue(False)
+                        self.logger.info("FLIR target FPS set to unlimited (AcquisitionFrameRateEnable=False)")
+                        return
+                    except Exception:
+                        pass
+                # If we can't disable, just return without forcing a value.
+                self.logger.info("FLIR target FPS unlimited requested (rate-limit disable not supported)")
+                return
+
+            # Finite FPS: enable rate control then set value
+            if hasattr(self.camera, 'AcquisitionFrameRateEnable'):
+                try:
+                    self.camera.AcquisitionFrameRateEnable.SetValue(True)
+                except Exception:
+                    pass
+            if hasattr(self.camera, 'AcquisitionFrameRate'):
+                self.camera.AcquisitionFrameRate.SetValue(int(fps))
                 self.logger.info(f"FLIR target FPS updated to {fps}")
         except Exception as e:
             self.logger.error(f"Error updating FLIR FPS: {e}")
 
 
 # Utility function for FLIR camera detection
-def detect_flir_cameras() -> List[Dict]:
+def detect_flir_cameras() -> Dict[str, Dict]:
     """
     Detect available FLIR cameras.
-    
+
     Returns:
-        List of camera information dictionaries
+        Dict mapping camera_name -> camera_info
     """
-    cameras = []
+    cameras: Dict[str, Dict] = {}
     
     if not FLIR_AVAILABLE:
         return cameras
@@ -603,8 +638,9 @@ def detect_flir_cameras() -> List[Dict]:
     try:
         system = PySpin.System.GetInstance()
         camera_list = system.GetCameras()
-        
-        for idx, camera in enumerate(camera_list):
+
+        for idx in range(camera_list.GetSize()):
+            camera = camera_list.GetByIndex(idx)
             try:
                 camera.Init()
                 
@@ -612,28 +648,33 @@ def detect_flir_cameras() -> List[Dict]:
                 model = camera.DeviceModelName.GetValue()
                 serial = camera.DeviceSerialNumber.GetValue()
                 
-                # Create camera info dictionary
-                camera_info = {
+                # Store only identifiers here; actual CameraPtr must be created per worker
+                cam_name = f"FLIR_{model}_{serial}"
+                cameras[cam_name] = {
+                    # Normalized to CameraType.FLIR by camera_interface to avoid circular imports here
                     "type": "flir",
-                    "device": camera,
+                    "index": idx,
                     "model": model,
                     "serial": serial,
                     "settings": {
-                        "resolution": (640, 480),  # Default thermal resolution
-                        "fps": 30,  # Default thermal FPS
-                        "zoom": 1.0
-                    }
+                        "resolution": (640, 480),
+                        "fps": 30,
+                        "zoom": 1.0,
+                    },
                 }
-                
-                cameras.append({
-                    f"FLIR_{model}_{serial}": camera_info
-                })
-                
-                camera.Deinit()
+
+                camera.DeInit()
                 
             except Exception as e:
                 logging.getLogger("FLIRCamera").warning(f"Error detecting FLIR camera {idx}: {e}")
+            finally:
+                try:
+                    del camera
+                except Exception:
+                    pass
         
+        camera_list.Clear()
+        del camera_list
         system.ReleaseInstance()
         
     except Exception as e:

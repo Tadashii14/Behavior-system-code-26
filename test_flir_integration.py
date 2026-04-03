@@ -29,7 +29,7 @@ def test_flir_availability():
     
     try:
         import PySpin
-        logger.info("✅ FLIR Spinnaker SDK imported successfully")
+        logger.info("FLIR Spinnaker SDK imported successfully")
         
         # Get system version
         system = PySpin.System.GetInstance()
@@ -39,10 +39,10 @@ def test_flir_availability():
         
         return True
     except ImportError as e:
-        logger.error(f"❌ FLIR SDK not available: {e}")
+        logger.error(f"FLIR SDK not available: {e}")
         return False
     except Exception as e:
-        logger.error(f"❌ FLIR SDK error: {e}")
+        logger.error(f"FLIR SDK error: {e}")
         return False
 
 def test_camera_detection():
@@ -54,7 +54,7 @@ def test_camera_detection():
         cameras = flir_camera.detect_flir_cameras()
         
         if cameras:
-            logger.info(f"✅ Found {len(cameras)} FLIR camera(s):")
+            logger.info(f"Found {len(cameras)} FLIR camera(s):")
             for cam_name, cam_info in cameras.items():
                 logger.info(f"   {cam_name}:")
                 logger.info(f"     Model: {cam_info.get('model', 'Unknown')}")
@@ -63,11 +63,11 @@ def test_camera_detection():
                 logger.info(f"     FPS: {cam_info.get('settings', {}).get('fps', 'Unknown')}")
             return True
         else:
-            logger.warning("⚠️  No FLIR cameras detected")
+            logger.warning("No FLIR cameras detected")
             return False
             
     except Exception as e:
-        logger.error(f"❌ Camera detection failed: {e}")
+        logger.error(f"Camera detection failed: {e}")
         return False
 
 def test_camera_controller_integration():
@@ -85,20 +85,20 @@ def test_camera_controller_integration():
         flir_cameras = [name for name in cameras if 'FLIR' in name]
         
         if flir_cameras:
-            logger.info(f"✅ CameraController detected FLIR cameras:")
+            logger.info("CameraController detected FLIR cameras:")
             for cam_name in flir_cameras:
                 logger.info(f"   {cam_name}")
-                cam_info = controller.get_camera_info(cam_name)
-                if cam_info:
+                cam_info = getattr(controller, "cameras", {}).get(cam_name)
+                if isinstance(cam_info, dict):
                     logger.info(f"     Type: {cam_info.get('type')}")
                     logger.info(f"     Settings: {cam_info.get('settings')}")
             return True
         else:
-            logger.warning("⚠️  No FLIR cameras in CameraController")
+            logger.warning("No FLIR cameras in CameraController")
             return False
             
     except Exception as e:
-        logger.error(f"❌ CameraController integration failed: {e}")
+        logger.error(f"CameraController integration failed: {e}")
         return False
 
 def test_performance_benchmarks():
@@ -133,11 +133,11 @@ def test_performance_benchmarks():
             theoretical_fps = 1000 / avg_time if avg_time > 0 else 999
             logger.info(f"     Theoretical FPS: {theoretical_fps:.1f}")
         
-        logger.info("✅ Performance benchmarks completed")
+        logger.info("Performance benchmarks completed")
         return True
         
     except Exception as e:
-        logger.error(f"❌ Performance benchmarks failed: {e}")
+        logger.error(f"Performance benchmarks failed: {e}")
         return False
 
 def test_usb3_optimization():
@@ -149,7 +149,7 @@ def test_usb3_optimization():
         cameras = flir_camera.detect_flir_cameras()
         
         if not cameras:
-            logger.warning("⚠️  No FLIR cameras for USB3 test")
+            logger.warning("No FLIR cameras for USB3 test")
             return False
         
         # Test optimization constants
@@ -157,16 +157,16 @@ def test_usb3_optimization():
         logger.info(f"   Pixel Format: {flir_camera.FLIR_PIXEL_FORMAT}")
         logger.info(f"   Packet Size: {flir_camera.FLIR_PACKET_SIZE}")
         
-        logger.info("✅ USB3 optimization constants verified")
+        logger.info("USB3 optimization constants verified")
         return True
         
     except Exception as e:
-        logger.error(f"❌ USB3 optimization test failed: {e}")
+        logger.error(f"USB3 optimization test failed: {e}")
         return False
 
 def main():
     """Main test function"""
-    logger.info("🚀 Starting FLIR Camera Integration Test")
+    logger.info("Starting FLIR Camera Integration Test")
     logger.info("=" * 50)
     
     tests = [
@@ -180,26 +180,26 @@ def main():
     results = []
     
     for test_name, test_func in tests:
-        logger.info(f"\n🧪 Running Test: {test_name}")
+        logger.info(f"\nRunning Test: {test_name}")
         logger.info("-" * 30)
         
         try:
             result = test_func()
             results.append((test_name, result))
         except Exception as e:
-            logger.error(f"❌ Test '{test_name}' crashed: {e}")
+            logger.error(f"Test '{test_name}' crashed: {e}")
             results.append((test_name, False))
     
     # Summary
     logger.info("\n" + "=" * 50)
-    logger.info("📊 TEST SUMMARY")
+    logger.info("TEST SUMMARY")
     logger.info("=" * 50)
     
     passed = 0
     total = len(results)
     
     for test_name, result in results:
-        status = "✅ PASS" if result else "❌ FAIL"
+        status = "PASS" if result else "FAIL"
         logger.info(f"{test_name:<30} {status}")
         if result:
             passed += 1
@@ -208,10 +208,10 @@ def main():
     logger.info(f"Results: {passed}/{total} tests passed")
     
     if passed == total:
-        logger.info("🎉 ALL TESTS PASSED - FLIR integration ready!")
+        logger.info("ALL TESTS PASSED - FLIR integration ready!")
         return 0
     else:
-        logger.warning("⚠️  Some tests failed - check implementation")
+        logger.warning("Some tests failed - check implementation")
         return 1
 
 if __name__ == "__main__":

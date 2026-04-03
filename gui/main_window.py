@@ -1,11 +1,11 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QTabWidget, QGroupBox, QPushButton,
+    QLabel, QGroupBox, QPushButton,
     QCheckBox, QSlider, QSpinBox, QColorDialog, QComboBox, QMessageBox,
     QStackedWidget, QFrame
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QIcon, QImage, QPixmap
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QImage, QPixmap
 import logging
 import time
 import cv2
@@ -86,7 +86,11 @@ class MainWindow(QMainWindow):
         self.fps_counter_label = None  # FPS overlay label
         self.current_fps = 0.0
 
-        self.setWindowTitle("ZIMON — Behaviour Tracking System")
+        try:
+            from version import __version__ as _app_version
+        except ImportError:
+            _app_version = "?"
+        self.setWindowTitle(f"ZIMON v{_app_version} — Behaviour Tracking System")
         self.resize(1400, 900)
         self._build_ui()
         # Start maximized for best experience
@@ -95,6 +99,27 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self._connect_backend)
         QTimer.singleShot(200, self._init_camera_list)
         QTimer.singleShot(300, self._optimize_performance)
+
+    def closeEvent(self, event):
+        """Ensure camera threads stop before widgets are destroyed."""
+        try:
+            if self.camera and self.current_camera:
+                try:
+                    self.camera.stop_preview(self.current_camera)
+                except Exception:
+                    pass
+            if self.camera:
+                try:
+                    self.camera.cleanup()
+                except Exception:
+                    pass
+        finally:
+            # Avoid callbacks trying to paint into deleted widgets
+            try:
+                self.camera_preview_labels.clear()
+            except Exception:
+                pass
+            event.accept()
 
     def _optimize_performance(self):
         """Optimize performance after UI is loaded"""
@@ -726,16 +751,68 @@ class MainWindow(QMainWindow):
         controls_label.setStyleSheet("color: #e8e9ea; font-weight: 500; margin-top: 8px;")
         layout.addWidget(controls_label)
 
+        # Acquisition controls (needed for FLIR resolution changes)
+        acq_layout = QHBoxLayout()
+        self.camera_start_btn = QPushButton("Start")
+        self.camera_start_btn.setObjectName("AcqButton")
+        self.camera_start_btn.setFixedSize(76, 24)
+        self.camera_start_btn.setEnabled(False)
+        self.camera_start_btn.clicked.connect(self._start_camera_acquisition)
+        self.camera_stop_btn = QPushButton("Stop")
+        self.camera_stop_btn.setObjectName("AcqButton")
+        self.camera_stop_btn.setFixedSize(76, 24)
+        self.camera_stop_btn.setEnabled(False)
+        self.camera_stop_btn.clicked.connect(self._stop_camera_acquisition)
+        acq_layout.addWidget(self.camera_start_btn)
+        acq_layout.addWidget(self.camera_stop_btn)
+        acq_layout.addStretch()
+        layout.addLayout(acq_layout)
+
         # FPS control
         fps_layout = QHBoxLayout()
         fps_layout.addWidget(QLabel("FPS:"))
         self.fps_spinbox = QSpinBox()
-        self.fps_spinbox.setRange(1, 120)
-        self.fps_spinbox.setValue(60)  # Changed default from 30 to 60
+        # Allow high FPS for FLIR/Basler; webcam may clamp internally
+        # 0 means "unlimited" (free-run) for supported cameras
+        self.fps_spinbox.setRange(0, 10000)
+        self.fps_spinbox.setSpecialValueText("∞")
+        self.fps_spinbox.setValue(60)  # Default
+        # Make typing responsive (not just arrow clicks)
+        self.fps_spinbox.setKeyboardTracking(False)
+        self.fps_spinbox.setAccelerated(True)
+        # Also allow mouse wheel increments while focused
+        self.fps_spinbox.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Allow typing "I" / "i" to set unlimited
+        try:
+            self.fps_spinbox.lineEdit().installEventFilter(self)
+        except Exception:
+            pass
         self.fps_spinbox.setEnabled(False)
         self.fps_spinbox.valueChanged.connect(self._on_fps_changed)
         fps_layout.addWidget(self.fps_spinbox)
         layout.addLayout(fps_layout)
+
+        # FPS presets
+        presets_layout = QHBoxLayout()
+        presets_layout.setContentsMargins(0, 6, 0, 0)
+        presets_layout.setSpacing(6)
+        self._fps_preset_buttons = []
+        for preset in (60, 120, 180, 240):
+            btn = QPushButton(str(preset))
+            btn.setFixedSize(52, 24)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setObjectName("FpsPresetButton")
+            btn.clicked.connect(lambda _=False, v=preset: self._set_fps_preset(v))
+            self._fps_preset_buttons.append(btn)
+            presets_layout.addWidget(btn)
+
+        inf_btn = QPushButton("∞")
+        inf_btn.setFixedSize(52, 24)
+        inf_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        inf_btn.setObjectName("FpsPresetButton")
+        inf_btn.clicked.connect(self._set_fps_unlimited)
+        presets_layout.addWidget(inf_btn)
+        layout.addLayout(presets_layout)
 
         # Zoom control
         zoom_layout = QHBoxLayout()
@@ -1532,6 +1609,10 @@ class MainWindow(QMainWindow):
                 "640x480", "800x600", "1024x768", "1280x720", "1280x960",
                 "1280x1024", "1600x1200", "1920x1080", "2048x1536"
             ]
+        elif cam_info and cam_info["type"] == CameraType.FLIR:
+            # Offer a few safe FLIR modes; apply only when acquisition is stopped.
+            # (Exact availability can vary by PixelFormat/decimation/ROI; we keep it simple.)
+            resolutions = ["640x480", "800x600", "1024x768", "1280x720", "1440x1080"]
 
         # Update the combo box
         if hasattr(self, 'resolution_combo'):
@@ -1549,17 +1630,36 @@ class MainWindow(QMainWindow):
             else:
                 self.resolution_combo.addItem("1280x1024")
                 self.resolution_combo.setCurrentIndex(0)
-            self.resolution_combo.setEnabled(True)
+            # FLIR resolution changes are restricted while streaming (Stop to change)
+            is_streaming = False
+            try:
+                is_streaming = bool(self.camera and hasattr(self.camera, "workers") and camera_name in self.camera.workers)
+            except Exception:
+                is_streaming = False
+            self.resolution_combo.setEnabled(not (cam_info and cam_info.get("type") == CameraType.FLIR and is_streaming))
             self.resolution_combo.blockSignals(False)
 
-        # Set and store this resolution as current before preview
-        if hasattr(self, 'resolution_combo') and self.resolution_combo.count() > 0:
-            default_res = self.resolution_combo.currentText()
-            if default_res:
-                parts = default_res.split('x')
-                if len(parts) == 2:
-                    w, h = int(parts[0]), int(parts[1])
-                    self.camera.set_setting(camera_name, "resolution", (w, h))
+        # Set and store resolution before preview (webcams only; FLIR nodes are often read-only)
+        try:
+            cam_info = self.camera.cameras.get(camera_name) if self.camera else None
+        except Exception:
+            cam_info = None
+
+        if cam_info and cam_info.get("type") == CameraType.WEBCAM:
+            if hasattr(self, 'resolution_combo') and self.resolution_combo.count() > 0:
+                default_res = self.resolution_combo.currentText()
+                if default_res:
+                    parts = default_res.split('x')
+                    if len(parts) == 2:
+                        w, h = int(parts[0]), int(parts[1])
+                        self.camera.set_setting(camera_name, "resolution", (w, h))
+
+        # Apply desired FPS before starting preview (best-effort; backend may clamp)
+        try:
+            if hasattr(self, "fps_spinbox"):
+                self.camera.set_setting(camera_name, "fps", int(self.fps_spinbox.value()))
+        except Exception:
+            pass
 
         # Start preview
         # Disable UI controls during start
@@ -1577,10 +1677,13 @@ class MainWindow(QMainWindow):
             self.fps_spinbox.setEnabled(True)
             self.zoom_slider.setEnabled(True)
             self.resolution_combo.setEnabled(True)
+            if hasattr(self, "camera_start_btn") and hasattr(self, "camera_stop_btn"):
+                self.camera_start_btn.setEnabled(False)
+                self.camera_stop_btn.setEnabled(True)
 
             # Load current settings
             if self.camera:
-                fps = self.camera.get_setting(camera_name, "fps") or 60  # Changed fallback from 30 to 60
+                fps = self.camera.get_setting(camera_name, "fps") or 180
                 zoom = self.camera.get_setting(camera_name, "zoom") or 1.0
                 self.fps_spinbox.setValue(int(fps))
                 self.zoom_slider.setValue(int(zoom * 100))
@@ -1593,6 +1696,51 @@ class MainWindow(QMainWindow):
                 self.fps_spinbox.setEnabled(True)
             if hasattr(self, 'zoom_slider'):
                 self.zoom_slider.setEnabled(True)
+            if hasattr(self, "camera_start_btn") and hasattr(self, "camera_stop_btn"):
+                self.camera_start_btn.setEnabled(True)
+                self.camera_stop_btn.setEnabled(False)
+
+    def _stop_camera_acquisition(self):
+        """Stop camera streaming/acquisition so settings like resolution can change."""
+        if not self.current_camera or not self.camera:
+            return
+        try:
+            self.camera.stop_preview(self.current_camera)
+        except Exception:
+            pass
+
+        # When stopped, allow resolution changes (including FLIR)
+        try:
+            cam_info = self.camera.cameras.get(self.current_camera)
+        except Exception:
+            cam_info = None
+        if hasattr(self, "resolution_combo"):
+            self.resolution_combo.setEnabled(True)
+        if hasattr(self, "camera_start_btn") and hasattr(self, "camera_stop_btn"):
+            self.camera_start_btn.setEnabled(True)
+            self.camera_stop_btn.setEnabled(False)
+
+    def _start_camera_acquisition(self):
+        """Start camera streaming/acquisition after settings changes."""
+        if not self.current_camera or not self.camera:
+            return
+        # Start preview again
+        if self.camera.start_preview(self.current_camera, self._update_camera_frame):
+            if hasattr(self, "camera_start_btn") and hasattr(self, "camera_stop_btn"):
+                self.camera_start_btn.setEnabled(False)
+                self.camera_stop_btn.setEnabled(True)
+            # If streaming, lock FLIR resolution changes again
+            try:
+                cam_info = self.camera.cameras.get(self.current_camera)
+            except Exception:
+                cam_info = None
+            if cam_info and cam_info.get("type") == CameraType.FLIR:
+                if hasattr(self, "resolution_combo"):
+                    self.resolution_combo.setEnabled(False)
+        else:
+            if hasattr(self, "camera_start_btn") and hasattr(self, "camera_stop_btn"):
+                self.camera_start_btn.setEnabled(True)
+                self.camera_stop_btn.setEnabled(False)
 
     
     def _update_camera_frame(self, frame: np.ndarray):
@@ -1601,26 +1749,34 @@ class MainWindow(QMainWindow):
             return
         
         try:
-            # Limit UI updates to ~30 FPS for smooth performance
+            # Limit UI updates to ~60 FPS for smooth performance
             current_time = time.time()
             if not hasattr(self, '_last_ui_update'):
                 self._last_ui_update = 0
             
-            if current_time - self._last_ui_update < 0.033:  # ~30 FPS UI update
+            if current_time - self._last_ui_update < 0.016:  # ~60 FPS UI update
                 return
             self._last_ui_update = current_time
             
-            # Simple FPS counter
-            self.fps_frame_times.append(current_time)
-            self.fps_frame_times = [t for t in self.fps_frame_times[-30:] if current_time - t < 1.0]
-            
-            if len(self.fps_frame_times) > 1:
-                time_span = self.fps_frame_times[-1] - self.fps_frame_times[0]
-                self.current_fps = len(self.fps_frame_times) / time_span if time_span > 0 else 0
-            
-            # Update FPS label
+            # Update FPS label (prefer capture FPS from worker over UI repaint rate)
             if self.fps_counter_label:
-                self.fps_counter_label.setText(f"FPS: {self.current_fps:.1f}")
+                capture_fps = None
+                try:
+                    if self.camera and self.current_camera:
+                        capture_fps = self.camera.get_current_fps(self.current_camera)
+                except Exception:
+                    capture_fps = None
+
+                if capture_fps is None:
+                    # Fallback: UI repaint rate approximation
+                    self.fps_frame_times.append(current_time)
+                    self.fps_frame_times = [t for t in self.fps_frame_times[-60:] if current_time - t < 1.0]
+                    if len(self.fps_frame_times) > 1:
+                        time_span = self.fps_frame_times[-1] - self.fps_frame_times[0]
+                        self.current_fps = len(self.fps_frame_times) / time_span if time_span > 0 else 0
+                    self.fps_counter_label.setText(f"FPS: {self.current_fps:.1f}")
+                else:
+                    self.fps_counter_label.setText(f"FPS: {float(capture_fps):.1f}")
             
             # Convert frame to RGB - handle different camera formats
             try:
@@ -1651,10 +1807,20 @@ class MainWindow(QMainWindow):
             
             # Get first visible preview label
             preview_label = None
-            for label in self.camera_preview_labels:
-                if label and label.isVisible():
-                    preview_label = label
-                    break
+            # Drop any deleted labels to avoid runtime errors
+            for label in list(self.camera_preview_labels):
+                if label is None:
+                    continue
+                try:
+                    if label.isVisible():
+                        preview_label = label
+                        break
+                except RuntimeError:
+                    # Wrapped C++ object deleted
+                    try:
+                        self.camera_preview_labels.remove(label)
+                    except ValueError:
+                        pass
             
             if preview_label is None:
                 return
@@ -1729,15 +1895,46 @@ class MainWindow(QMainWindow):
         if self.camera.are_ui_controls_disabled():
             return
         
-        # Disable control during operation
-        self.fps_spinbox.setEnabled(False)
-        
+        # Debounce changes so typing and arrow-holding doesn't "fight" the UI.
+        if not hasattr(self, "_fps_apply_timer"):
+            self._fps_apply_timer = QTimer(self)
+            self._fps_apply_timer.setSingleShot(True)
+            self._fps_apply_timer.timeout.connect(self._apply_fps_change)
+
+        self._pending_fps_value = int(value)
+        self._fps_apply_timer.start(120)
+
+    def _apply_fps_change(self):
+        """Apply pending FPS value to the active camera"""
+        if not self.current_camera or not self.camera:
+            return
+        value = int(getattr(self, "_pending_fps_value", self.fps_spinbox.value()))
         # Set setting through controller (will check safety)
         if self.camera.set_setting(self.current_camera, "fps", value):
             self.logger.info(f"FPS changed to {value}")
-        
-        # Re-enable control after a short delay
-        QTimer.singleShot(200, lambda: self.fps_spinbox.setEnabled(True))
+
+    def _set_fps_preset(self, value: int):
+        """Set FPS from preset buttons"""
+        if hasattr(self, "fps_spinbox") and self.fps_spinbox:
+            self.fps_spinbox.setValue(int(value))
+
+    def _set_fps_unlimited(self):
+        """Set FPS to unlimited (free-run)"""
+        if hasattr(self, "fps_spinbox") and self.fps_spinbox:
+            self.fps_spinbox.setValue(0)
+
+    def eventFilter(self, obj, event):
+        """Allow 'I' key to set FPS unlimited."""
+        try:
+            if obj == getattr(self, "fps_spinbox", None).lineEdit():
+                if event.type() == event.Type.KeyPress:
+                    text = event.text()
+                    if text in ("i", "I"):
+                        self._set_fps_unlimited()
+                        return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
     
     def _on_zoom_changed(self, value: int):
         """Handle zoom change - uses CameraController safety"""
@@ -1772,6 +1969,12 @@ class MainWindow(QMainWindow):
         # Check camera type
         camera_name = self.current_camera
         cam_info = self.camera.cameras.get(camera_name)
+
+        is_streaming = False
+        try:
+            is_streaming = bool(self.camera and hasattr(self.camera, "workers") and camera_name in self.camera.workers)
+        except Exception:
+            is_streaming = False
         
         # For Basler cameras, log that we're attempting resolution change
         if cam_info and cam_info.get("type") == CameraType.BASLER:
@@ -1791,14 +1994,25 @@ class MainWindow(QMainWindow):
             width = int(parts[0])
             height = int(parts[1])
             
-            # Set setting through controller (will check safety and Basler protection)
+            # FLIR: do NOT auto-restart. User must Stop -> change -> Start.
+            if cam_info and cam_info.get("type") == CameraType.FLIR:
+                if is_streaming:
+                    self.logger.warning("Stop acquisition before changing FLIR resolution")
+                    return
+
+                if self.camera.set_setting(camera_name, "resolution", (width, height)):
+                    self.logger.info(f"FLIR resolution staged to {width}x{height} (press Start)")
+                    if hasattr(self, "camera_start_btn") and hasattr(self, "camera_stop_btn"):
+                        self.camera_start_btn.setEnabled(True)
+                        self.camera_stop_btn.setEnabled(False)
+                else:
+                    self.logger.warning("FLIR resolution change rejected by CameraController")
+                return
+
+            # Webcam/Basler: keep existing auto-restart behavior
             if self.camera.set_setting(camera_name, "resolution", (width, height)):
                 self.logger.info(f"Resolution changed to {width}x{height}")
-                
-                # Stop current preview
                 self.camera.stop_preview(camera_name)
-                
-                # Restart preview with new resolution after short delay
                 QTimer.singleShot(100, lambda: self._restart_preview_with_new_resolution(camera_name))
             else:
                 self.logger.warning("Resolution change rejected by CameraController")
@@ -1806,160 +2020,16 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.logger.error(f"Error changing resolution: {e}")
         finally:
-            # Re-enable control after operation
-            QTimer.singleShot(500, lambda: self.resolution_combo.setEnabled(True))
-
-
-def _update_camera_frame(self, frame: np.ndarray):
-    """Update camera preview with new frame - optimized for performance"""
-    if not self.camera_preview_labels:
-        return
-    
-    try:
-        # Process all frames for accurate FPS counting
-        current_time = time.time()
-        
-        # Simple FPS counter
-        self.fps_frame_times.append(current_time)
-        self.fps_frame_times = [t for t in self.fps_frame_times[-60:] if current_time - t < 1.0]
-        
-        if len(self.fps_frame_times) > 1:
-            time_span = self.fps_frame_times[-1] - self.fps_frame_times[0]
-            self.current_fps = len(self.fps_frame_times) / time_span if time_span > 0 else 0
-        
-        # Update FPS label
-        if self.fps_counter_label:
-            self.fps_counter_label.setText(f"FPS: {self.current_fps:.1f}")
-        
-        # Convert frame to RGB - handle different camera formats (optimized for speed)
-        try:
-            if frame is None:
-                return
-                
-            # Handle different frame formats from different cameras
-            if len(frame.shape) == 2:
-                # Grayscale frame - convert to RGB (faster for Basler Mono8)
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
-            elif len(frame.shape) == 3:
-                if frame.shape[2] == 3:
-                    # BGR frame - convert to RGB
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                elif frame.shape[2] == 4:
-                    # BGRA frame - convert to RGB
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
-                else:
-                    # Unknown format, use as-is
-                    rgb_frame = frame
-            else:
-                # Unknown format, use as-is
-                rgb_frame = frame
-                
-        except Exception as e:
-            self.logger.error(f"Error converting frame format: {e}, frame shape: {frame.shape if frame is not None else 'None'}")
-            return
-        
-        # Get first visible preview label
-        preview_label = None
-        for label in self.camera_preview_labels:
-            if label and label.isVisible():
-                preview_label = label
-                break
-        
-        if preview_label is None:
-            return
-        
-        # Cache label dimensions to avoid repeated calls
-        if not hasattr(self, '_cached_label_size') or self._cached_label_size != (preview_label.width(), preview_label.height()):
-            self._cached_label_size = (preview_label.width(), preview_label.height())
-            self._cached_scaled_size = (
-                max(preview_label.width(), 320),
-                max(preview_label.height(), 240)
-            )
-        
-        # Create QImage directly from numpy array - optimized for high FPS
-        try:
-            h, w = rgb_frame.shape[:2]
-            
-            # Determine bytes per line based on frame format
-            if len(rgb_frame.shape) == 3:
-                bytes_per_line = w * rgb_frame.shape[2]
-            else:
-                bytes_per_line = w * 3  # Default to 3 channels
-            
-            # Use ascontiguousarray to ensure memory layout (faster for high FPS)
-            rgb_frame_contiguous = np.ascontiguousarray(rgb_frame)
-            
-            # Create QImage with error checking
-            if len(rgb_frame_contiguous.shape) == 3 and rgb_frame_contiguous.shape[2] == 3:
-                qt_image = QImage(rgb_frame_contiguous.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-            elif len(rgb_frame_contiguous.shape) == 2:
-                # Grayscale
-                qt_image = QImage(rgb_frame_contiguous.data, w, h, bytes_per_line, QImage.Format.Format_Grayscale8)
-            else:
-                # Fallback format
-                qt_image = QImage(rgb_frame_contiguous.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-            
-            if qt_image.isNull():
-                self.logger.warning(f"Failed to create QImage from frame shape: {rgb_frame_contiguous.shape}")
-                return
-            
-            # Scale pixmap once using cached size and zoom
-            # Get current zoom setting
-            zoom = self.camera.get_setting(self.current_camera, "zoom") if self.camera and self.current_camera else 1.0
-            zoom = zoom if zoom is not None else 1.0
-            
-            # Apply zoom to scaling
-            scaled_width = int(self._cached_scaled_size[0] * zoom)
-            scaled_height = int(self._cached_scaled_size[1] * zoom)
-            
-            # Use FastTransformation for high FPS
-            scaled_pixmap = QPixmap.fromImage(qt_image).scaled(
-                scaled_width,
-                scaled_height,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation
-            )
-            
-            # Update label
-            preview_label.setPixmap(scaled_pixmap)
-            
-        except Exception as e:
-            self.logger.error(f"Error creating QImage from frame: {e}, frame shape: {rgb_frame.shape if rgb_frame is not None else 'None'}")
-            return
-        
-    except Exception as e:
-        self.logger.error(f"Error updating camera frame: {e}")
-    
-    def _restart_preview_with_new_resolution(self, camera_name: str):
-        """Restart camera preview with new resolution - non-blocking"""
-        try:
-            if self.camera.start_preview(camera_name, self._update_camera_frame):
-                self.logger.info(f"Restarted preview for {camera_name} with new resolution")
-            else:
-                self.logger.error(f"Failed to restart preview for {camera_name}")
-        except Exception as e:
-            self.logger.error(f"Error restarting preview: {e}")
-    
-    def _update_resolution_display(self):
-        """Update resolution display after change"""
-        if self.current_camera and self.camera:
-            resolution = self.camera.get_resolution(self.current_camera)
-            if resolution and self.camera_resolution_label:
-                w, h = resolution
-                self.camera_resolution_label.setText(f"Resolution: {w}x{h}")
-                # Update combo box to show actual resolution
-                if hasattr(self, 'resolution_combo'):
-                    resolution_str = f"{w}x{h}"
-                    self.resolution_combo.blockSignals(True)
-                    index = self.resolution_combo.findText(resolution_str)
-                    if index >= 0:
-                        self.resolution_combo.setCurrentIndex(index)
+            # Re-enable control after operation (FLIR stays disabled while streaming)
+            def _reenable():
+                try:
+                    cam_info2 = self.camera.cameras.get(self.current_camera) if self.camera and self.current_camera else None
+                    streaming2 = bool(self.camera and hasattr(self.camera, "workers") and self.current_camera in self.camera.workers)
+                    if cam_info2 and cam_info2.get("type") == CameraType.FLIR and streaming2:
+                        self.resolution_combo.setEnabled(False)
                     else:
-                        # Add if not in list
-                        self.resolution_combo.addItem(resolution_str)
-                        self.resolution_combo.setCurrentText(resolution_str)
-                    self.resolution_combo.blockSignals(False)
+                        self.resolution_combo.setEnabled(True)
+                except Exception:
+                    self.resolution_combo.setEnabled(True)
 
-
-# End of MainWindow class
-            
+            QTimer.singleShot(250, _reenable)

@@ -145,6 +145,50 @@ QPushButton#Danger:pressed {
     background: #b91c1c;
 }
 
+/* Compact preset buttons (FPS presets etc.) */
+QPushButton#FpsPresetButton {
+    background: #4f46e5;
+    border: 1px solid #2a2d36;
+    border-radius: 8px;
+    padding: 0px;
+    min-height: 24px;
+    min-width: 52px;
+    font-weight: 600;
+}
+
+QPushButton#FpsPresetButton:hover {
+    background: #6366f1;
+}
+
+QPushButton#FpsPresetButton:pressed {
+    background: #4338ca;
+}
+
+/* Compact acquisition buttons (Start/Stop) */
+QPushButton#AcqButton {
+    background: #24262c;
+    border: 1px solid #2a2d36;
+    border-radius: 8px;
+    padding: 0px 10px;
+    min-height: 24px;
+    font-weight: 600;
+}
+
+QPushButton#AcqButton:hover {
+    background: #2a2d36;
+    border-color: #3a3d46;
+}
+
+QPushButton#AcqButton:pressed {
+    background: #1a1c21;
+}
+
+QPushButton#AcqButton:disabled {
+    background: #16181c;
+    color: #7a7d85;
+    border-color: #16181c;
+}
+
 /* CheckBox Styling */
 QCheckBox {
     spacing: 8px;

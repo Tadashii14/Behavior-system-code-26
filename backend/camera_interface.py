@@ -164,6 +164,14 @@ class WebcamCameraWorker(QThread):
         """Stop the capture thread"""
         self._running = False
         self.wait(1000)
+
+    def update_fps(self, fps: int):
+        """Update webcam FPS (best-effort; many webcams clamp)"""
+        try:
+            if self.cap is not None:
+                self.cap.set(cv2.CAP_PROP_FPS, int(fps))
+        except Exception:
+            pass
     
     def get_current_fps(self) -> float:
         """Get current FPS"""
@@ -568,6 +576,11 @@ class CameraController(QObject):
             try:
                 flir_cameras = flir_camera.detect_flir_cameras()
                 for cam_name, cam_info in flir_cameras.items():
+                    # Avoid circular imports: normalize to CameraType.FLIR here
+                    try:
+                        cam_info["type"] = CameraType.FLIR
+                    except Exception:
+                        pass
                     self.cameras[cam_name] = cam_info
                     detected.append(cam_name)
                     self.logger.info(f"Found FLIR camera: {cam_name}")
@@ -607,7 +620,8 @@ class CameraController(QObject):
         ]
         
         for backend_id, backend_name in backends:
-            for idx in range(10):
+            # Scan a small set for fast boot; use Refresh to rescan if needed
+            for idx in range(5):
                 if idx in found_indices:
                     continue
                 
@@ -623,7 +637,8 @@ class CameraController(QObject):
                             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                             
-                            cam_name = f"Camera_{idx} ({width}x{height})"
+                            # Use stable name; resolution can change at runtime
+                            cam_name = f"Webcam_{idx}"
                             
                             self.cameras[cam_name] = {
                                 "type": CameraType.WEBCAM,
@@ -638,7 +653,9 @@ class CameraController(QObject):
                             }
                             detected.append(cam_name)
                             found_indices.add(idx)
-                            self.logger.info(f"Found camera: {cam_name} via {backend_name}")
+                            self.logger.info(f"Found webcam: {cam_name} ({width}x{height}) via {backend_name}")
+                            # Fast boot: stop scanning after first working webcam.
+                            break
                         
                         cap.release()
                     else:
@@ -749,6 +766,12 @@ class CameraController(QObject):
                 self.logger.info(f"Stopping Basler camera for resolution change")
                 self.stop_preview(camera_name)
                 # Note: Resolution will be applied on next start
+
+        # For FLIR, require stop before changing resolution (nodes usually non-writable while streaming)
+        if cam_info["type"] == CameraType.FLIR and setting == "resolution":
+            if camera_name in self.workers:
+                self.logger.warning("Stop acquisition before changing FLIR resolution")
+                return False
         
         # For Basler, update FPS in real-time
         if cam_info["type"] == CameraType.BASLER and setting == "fps":
@@ -757,6 +780,26 @@ class CameraController(QObject):
                 if hasattr(worker, 'update_fps'):
                     worker.update_fps(int(value))
                     self.logger.info(f"Updated Basler FPS to {value}")
+
+        # For Webcam, attempt FPS update in real-time
+        if cam_info["type"] == CameraType.WEBCAM and setting == "fps":
+            if camera_name in self.workers:
+                worker = self.workers[camera_name]
+                if hasattr(worker, "update_fps"):
+                    try:
+                        worker.update_fps(int(value))
+                    except Exception:
+                        pass
+
+        # For FLIR, update FPS in real-time (Spinnaker AcquisitionFrameRate)
+        if cam_info["type"] == CameraType.FLIR and setting == "fps":
+            if camera_name in self.workers:
+                worker = self.workers[camera_name]
+                if hasattr(worker, "update_fps"):
+                    try:
+                        worker.update_fps(int(value))
+                    except Exception:
+                        pass
         
         cam_info["settings"][setting] = value
         
@@ -835,16 +878,19 @@ class CameraController(QObject):
         self.disable_ui_controls()
         
         try:
-            # Stop all webcam previews ONLY
+            # Stop all previews except Basler (Basler protection)
             for cam_name, worker in list(self.workers.items()):
                 cam_info = self.cameras.get(cam_name, {})
                 if cam_info.get("type") == CameraType.WEBCAM:
                     self.stop_preview(cam_name)
+                elif cam_info.get("type") == CameraType.FLIR:
+                    # FLIR must be stopped before re-detecting to release SystemPtr
+                    self.stop_preview(cam_name)
                 elif cam_info.get("type") == CameraType.BASLER:
                     self.logger.warning(f"NOT stopping Basler camera {cam_name} during refresh")
             
-            # Re-detect ONLY webcams
-            self.logger.info("Refreshing webcam list only (Basler cameras protected)")
+            # Re-detect webcams + FLIR (Basler protected)
+            self.logger.info("Refreshing cameras (Basler protected)")
             old_basler = {}
             for cam_name, cam_info in list(self.cameras.items()):
                 if cam_info.get("type") == CameraType.BASLER:
