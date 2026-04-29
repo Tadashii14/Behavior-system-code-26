@@ -40,8 +40,8 @@ A professional laboratory application for zebrafish behaviour tracking and analy
 
 1. **Clone the repository**
    ```bash
-   git clone <repository-url>
-   cd ZEBB_code
+   git clone https://github.com/Tadashii14/Behavior-system-code-26.git
+   cd Behavior-system-code-26
    ```
 
 2. **Create virtual environment**
@@ -55,25 +55,41 @@ A professional laboratory application for zebrafish behaviour tracking and analy
    pip install -r requirements.txt
    ```
 
-4. **Launch application**
+4. **FLIR Camera Setup (IMPORTANT)**
+   
+   **🚨 CRITICAL FOR FLIR CAMERAS:**
+   
+   If you want to use FLIR cameras, you MUST install the FLIR Spinnaker SDK with Python bindings:
+   
+   1. **Download FLIR Spinnaker SDK**
+      - Go to: https://www.flir.com/support-center/downloads/spinnaker/
+      - Download: Latest Spinnaker SDK (Windows 64-bit)
+   
+   2. **Install with Python Bindings**
+      - Right-click installer and "Run as administrator"
+      - Select "Custom" installation (NOT "Typical")
+      - **IMPORTANT**: Check "Python Bindings" option
+      - Complete installation
+   
+   3. **Verify Installation**
+      ```bash
+      python -c "import PySpin; print('PySpin version:', PySpin.__version__)"
+      ```
+   
+   4. **Test FLIR Detection**
+      ```bash
+      python test_flir_camera.py
+      ```
+
+5. **Launch application**
    ```bash
    python main.py
    ```
 
-### **Optional: FLIR Camera Support**
-For FLIR thermal camera support:
-```bash
-# Install FLIR SDK
-python install_flir.py
-
-# Or follow manual installation guide
-# See FLIR_INSTALLATION_GUIDE.md
-```
-
 ## 📁 Project Structure
 
 ```
-ZEBB_code/
+Behavior-system-code-26/
 ├── main.py                 # Main application entry point
 ├── requirements.txt        # Python dependencies
 ├── gui/                   # User interface components
@@ -91,7 +107,12 @@ ZEBB_code/
 ├── tracking/              # Tracking algorithms
 ├── analysis/              # Analysis tools
 ├── arduino/              # Arduino firmware
-└── config/               # Configuration files
+├── config/               # Configuration files
+└── tools/                # Utility and diagnostic tools
+    ├── test_flir_camera.py     # FLIR camera test
+    ├── diagnose_pyspin.py       # PySpin diagnostic
+    ├── simple_pyspin_fix.py     # PySpin fix tool
+    └── analyze_pyspin.py        # PySpin analysis
 ```
 
 ## 🎮 Usage
@@ -174,10 +195,34 @@ ZEBB_code/
 - Verify Arduino is powered
 - Check USB cable
 
+**FLIR Camera Not Detected (Most Common)**
+- **Issue**: PySpin Python bindings not installed
+- **Solution**: Install FLIR Spinnaker SDK with Python bindings
+- **Steps**: See "FLIR Camera Setup" section above
+- **Verify**: Run `python test_flir_camera.py`
+
 **Analysis stuck**
 - Check video file format
 - Verify ZebraZoom installation
 - Check available disk space
+
+### **Diagnostic Tools**
+
+Use the provided diagnostic tools:
+
+```bash
+# Test FLIR camera detection
+python test_flir_camera.py
+
+# Diagnose PySpin installation
+python diagnose_pyspin.py
+
+# Analyze PySpin module
+python analyze_pyspin.py
+
+# Fix PySpin installation (if needed)
+python simple_pyspin_fix.py
+```
 
 ### **Logs**
 Application logs are saved to:
@@ -187,7 +232,7 @@ Application logs are saved to:
 
 ## 📚 Documentation
 
-- **FLIR Integration**: See `FLIR_INSTALLATION_GUIDE.md`
+- **FLIR Integration**: See FLIR installation section
 - **Arduino Setup**: See `arduino/` directory
 - **API Reference**: See inline code documentation
 - **Troubleshooting**: See this section
@@ -213,4 +258,18 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ---
 
+## 🚨 **IMPORTANT FLIR CAMERA NOTE**
+
+**FLIR cameras require special installation:**
+
+1. **FLIR SpinView working ≠ PySpin Python bindings installed**
+2. **Must install FLIR Spinnaker SDK with Python bindings option**
+3. **Use provided diagnostic tools if issues occur**
+
+**FLIR Camera Priority**: Highest priority in camera selection (FLIR → Basler → Webcam)
+
+---
+
 **ZIMON - Professional Behaviour Tracking System for Laboratory Use** 🧬
+
+**Repository**: https://github.com/Tadashii14/Behavior-system-code-26

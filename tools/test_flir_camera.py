@@ -25,11 +25,18 @@ def test_camera_detection():
     try:
         import PySpin
         
-        # Get system instance
-        system = PySpin.System.GetInstance()
-        cam_list = system.GetCameras()
+        # Add parent directory to path for backend import
+        import sys
+        import os
+        parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
         
-        num_cameras = cam_list.GetSize()
+        # Use new detection method from flir_camera.py
+        from backend.flir_camera import detect_flir_cameras
+        cameras = detect_flir_cameras()
+        
+        num_cameras = len(cameras)
         print(f"Found {num_cameras} FLIR camera(s)")
         
         if num_cameras == 0:
@@ -38,19 +45,12 @@ def test_camera_detection():
             print("1. Camera is connected via USB3")
             print("2. Camera drivers are installed")
             print("3. Camera is not in use by other applications")
+            print("4. PySpin installation may be incomplete")
         else:
-            for i in range(num_cameras):
-                cam = cam_list.GetByIndex(i)
-                cam.Init()
-                
-                model = cam.DeviceModelName.GetValue()
-                serial = cam.DeviceSerialNumber.GetValue()
-                
-                print(f"Camera {i+1}: {model} (SN: {serial})")
-                cam.DeInit()
-        
-        cam_list.Clear()
-        system.ReleaseInstance()
+            for cam_name, cam_info in cameras.items():
+                model = cam_info.get("model", "Unknown")
+                serial = cam_info.get("serial", "Unknown")
+                print(f"Camera: {model} (SN: {serial})")
         
         return num_cameras > 0
         

@@ -58,7 +58,12 @@ FLIR_PACKET_SIZE = 0  # Auto-detect optimal packet size
 
 # Set pixel format only if PySpin is available
 if FLIR_AVAILABLE:
-    FLIR_PIXEL_FORMAT = PySpin.PixelFormat_Mono8  # Fastest format for thermal imaging
+    try:
+        FLIR_PIXEL_FORMAT = PySpin.PixelFormat_Mono8  # Fastest format for thermal imaging
+    except AttributeError:
+        # Fallback if PixelFormat_Mono8 not available
+        FLIR_PIXEL_FORMAT = None
+        logging.getLogger("FLIRCamera").warning("PixelFormat_Mono8 not available in this PySpin version")
 else:
     FLIR_PIXEL_FORMAT = None
 
@@ -636,8 +641,28 @@ def detect_flir_cameras() -> Dict[str, Dict]:
         return cameras
     
     try:
-        system = PySpin.System.GetInstance()
-        camera_list = system.GetCameras()
+        # Try different PySpin API versions
+        try:
+            # Newer PySpin versions
+            system = PySpin.System.GetInstance()
+            camera_list = system.GetCameras()
+        except AttributeError:
+            # Older PySpin versions or different API
+            try:
+                system = PySpin.System()
+                camera_list = system.GetCameras()
+            except AttributeError:
+                # Alternative API access
+                system = getattr(PySpin, 'System', None)
+                if system is None:
+                    logging.getLogger("FLIRCamera").error("PySpin.System not available in this version")
+                    return cameras
+                camera_list = system.GetCameras()
+        except Exception as e:
+            logging.getLogger("FLIRCamera").error(f"PySpin System access failed: {e}")
+            # Return empty cameras list if System not available
+            logging.getLogger("FLIRCamera").info("FLIR PySpin installed but System API not available - camera detection disabled")
+            return cameras
 
         for idx in range(camera_list.GetSize()):
             camera = camera_list.GetByIndex(idx)
@@ -675,7 +700,11 @@ def detect_flir_cameras() -> Dict[str, Dict]:
         
         camera_list.Clear()
         del camera_list
-        system.ReleaseInstance()
+        try:
+            system.ReleaseInstance()
+        except AttributeError:
+            # Some versions don't have ReleaseInstance
+            del system
         
     except Exception as e:
         logging.getLogger("FLIRCamera").error(f"FLIR camera detection failed: {e}")
